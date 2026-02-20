@@ -125,7 +125,7 @@ server.registerTool(
       queryEmbedding,
       userId,
       project: input.project,
-      matchThreshold: 0.5,
+      matchThreshold: 0.3,
       limit: input.limit,
     });
 

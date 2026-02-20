@@ -1,10 +1,7 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
-import { login, signup, logout, isAuthenticated, loadAuth } from "./auth/auth.ts";
-import { setSupabaseAuth, searchReasoning, generateEmbedding, listSessions } from "./storage/supabase.ts";
-import { syncToSupabase, getSyncStatus } from "./storage/sync.ts";
-import { ingestOpenCodeSessions } from "./ingestion/pipeline.ts";
-import { getPendingCount } from "./storage/buffer.ts";
+import { config } from "./config/config.ts";
+import { getStorageProvider, getEmbeddingProvider, resetProviders } from "./storage/provider.ts";
 import { runInit } from "./cli/init.ts";
 import { runBackfill } from "./backfill/backfill.ts";
 
@@ -15,15 +12,55 @@ program
   .description("Never lose the reasoning behind an AI-assisted decision again.")
   .version("0.1.0");
 
-// ---- Auth Commands ----
+/**
+ * Helper: require cloud mode for a command, exit with a clear error if local.
+ */
+function requireCloudMode(commandName: string): void {
+  if (config.storage.mode !== "cloud") {
+    console.error(
+      `Error: '${commandName}' requires cloud mode.\n` +
+        `Current mode: ${config.storage.mode}\n` +
+        `Set SESSIONGRAPH_STORAGE_MODE=cloud to use this command.`
+    );
+    process.exit(1);
+  }
+}
+
+/**
+ * Helper: resolve the current user ID.
+ * - Local mode: fixed user ID, no auth.
+ * - Cloud mode: loads auth.json, exits if not authenticated.
+ */
+async function resolveUserId(): Promise<string> {
+  if (config.storage.mode === "local") {
+    return "00000000-0000-0000-0000-000000000000";
+  }
+
+  const { loadAuth } = await import("./auth/auth.ts");
+  const auth = await loadAuth();
+  if (!auth) {
+    console.error("Not authenticated. Run 'sessiongraph login' first.");
+    process.exit(1);
+  }
+
+  // Set auth on the Supabase provider if needed
+  const { setSupabaseAuth } = await import("./storage/supabase.ts");
+  await setSupabaseAuth(auth.accessToken, auth.refreshToken);
+
+  return auth.userId;
+}
+
+// ---- Auth Commands (cloud-only) ----
 
 program
   .command("login")
-  .description("Log in to SessionGraph")
+  .description("Log in to SessionGraph (cloud mode only)")
   .requiredOption("-e, --email <email>", "Email address")
   .requiredOption("-p, --password <password>", "Password")
   .action(async (opts) => {
+    requireCloudMode("login");
     try {
+      const { login } = await import("./auth/auth.ts");
       const auth = await login(opts.email, opts.password);
       console.log(`Logged in as ${auth.email} (${auth.userId})`);
     } catch (err: any) {
@@ -34,11 +71,13 @@ program
 
 program
   .command("signup")
-  .description("Create a new SessionGraph account")
+  .description("Create a new SessionGraph account (cloud mode only)")
   .requiredOption("-e, --email <email>", "Email address")
   .requiredOption("-p, --password <password>", "Password (min 6 characters)")
   .action(async (opts) => {
+    requireCloudMode("signup");
     try {
+      const { signup } = await import("./auth/auth.ts");
       const auth = await signup(opts.email, opts.password);
       console.log(`Account created! Logged in as ${auth.email} (${auth.userId})`);
     } catch (err: any) {
@@ -49,8 +88,10 @@ program
 
 program
   .command("logout")
-  .description("Log out of SessionGraph")
+  .description("Log out of SessionGraph (cloud mode only)")
   .action(async () => {
+    requireCloudMode("logout");
+    const { logout } = await import("./auth/auth.ts");
     await logout();
     console.log("Logged out.");
   });
@@ -61,48 +102,57 @@ program
   .command("status")
   .description("Show SessionGraph status")
   .action(async () => {
-    const authed = await isAuthenticated();
-    const syncStatus = getSyncStatus();
-
     console.log("SessionGraph Status");
     console.log("-------------------");
-    console.log(`Authenticated: ${authed ? "Yes" : "No"}`);
-    console.log(`Pending sync:  ${syncStatus.pending} items`);
-    console.log(`Online:        ${syncStatus.isOnline ? "Yes" : "No"}`);
+    console.log(`Storage mode:  ${config.storage.mode}`);
 
-    if (authed) {
-      const auth = await loadAuth();
-      if (auth) {
-        console.log(`User:          ${auth.email}`);
-        console.log(`Expires:       ${new Date(auth.expiresAt).toLocaleString()}`);
+    if (config.storage.mode === "local") {
+      console.log(`Data dir:      ${config.paths.dataDir}`);
+      console.log(`PGlite dir:    ${config.paths.pgliteDir}`);
+
+      try {
+        const storage = await getStorageProvider();
+        const userId = "00000000-0000-0000-0000-000000000000";
+        const sessions = await storage.listSessions({ userId, limit: 1000 });
+        const totalChains = sessions.reduce((sum, s) => sum + s.chainCount, 0);
+        console.log(`Sessions:      ${sessions.length}`);
+        console.log(`Chains:        ${totalChains}`);
+        await resetProviders();
+      } catch (err: any) {
+        console.log(`Database:      Error: ${err.message}`);
       }
-    }
-  });
 
-// ---- Ingest ----
+      // Ollama status
+      try {
+        const resp = await fetch(`${config.ollama.baseUrl}/api/tags`);
+        if (resp.ok) {
+          const data = (await resp.json()) as { models?: Array<{ name: string }> };
+          const models = data.models?.map((m) => m.name).join(", ") ?? "none";
+          console.log(`Ollama:        Running (${models})`);
+        } else {
+          console.log(`Ollama:        Error (status ${resp.status})`);
+        }
+      } catch {
+        console.log(`Ollama:        Not running`);
+      }
+    } else {
+      // Cloud mode status
+      const { isAuthenticated, loadAuth } = await import("./auth/auth.ts");
+      const { getSyncStatus } = await import("./storage/sync.ts");
+      const authed = await isAuthenticated();
+      const syncStatus = getSyncStatus();
 
-program
-  .command("ingest")
-  .description("Ingest new sessions from AI tools (OpenCode)")
-  .action(async () => {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.error("Not authenticated. Run 'sessiongraph login' first.");
-      process.exit(1);
-    }
+      console.log(`Authenticated: ${authed ? "Yes" : "No"}`);
+      console.log(`Pending sync:  ${syncStatus.pending} items`);
+      console.log(`Online:        ${syncStatus.isOnline ? "Yes" : "No"}`);
 
-    await setSupabaseAuth(auth.accessToken, auth.refreshToken);
-
-    console.log("Ingesting new sessions from OpenCode...");
-    const result = await ingestOpenCodeSessions(auth.userId);
-    console.log(`Processed ${result.sessionsProcessed} sessions, extracted ${result.chainsExtracted} reasoning chains.`);
-
-    // Sync to Supabase
-    const pending = getPendingCount();
-    if (pending > 0) {
-      console.log(`Syncing ${pending} items to Supabase...`);
-      const syncResult = await syncToSupabase();
-      console.log(`Synced ${syncResult.synced}, failed ${syncResult.failed}.`);
+      if (authed) {
+        const auth = await loadAuth();
+        if (auth) {
+          console.log(`User:          ${auth.email}`);
+          console.log(`Expires:       ${new Date(auth.expiresAt).toLocaleString()}`);
+        }
+      }
     }
   });
 
@@ -115,24 +165,21 @@ program
   .option("-l, --limit <number>", "Max results", "5")
   .option("-p, --project <project>", "Filter by project")
   .action(async (query, opts) => {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.error("Not authenticated. Run 'sessiongraph login' first.");
-      process.exit(1);
-    }
+    const userId = await resolveUserId();
+    const storage = await getStorageProvider();
+    const embeddings = await getEmbeddingProvider();
 
-    await setSupabaseAuth(auth.accessToken, auth.refreshToken);
-
-    const queryEmbedding = await generateEmbedding(query);
-    const results = await searchReasoning({
+    const queryEmbedding = await embeddings.generateEmbedding(query);
+    const results = await storage.searchReasoning({
       queryEmbedding,
-      userId: auth.userId,
+      userId,
       project: opts.project,
       limit: parseInt(opts.limit, 10),
     });
 
     if (results.length === 0) {
       console.log("No results found.");
+      await resetProviders();
       return;
     }
 
@@ -145,6 +192,8 @@ program
       console.log(`  Date: ${r.createdAt}`);
       console.log();
     }
+
+    await resetProviders();
   });
 
 // ---- Sessions ----
@@ -156,16 +205,11 @@ program
   .option("-p, --project <project>", "Filter by project")
   .option("-t, --tool <tool>", "Filter by AI tool")
   .action(async (opts) => {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.error("Not authenticated. Run 'sessiongraph login' first.");
-      process.exit(1);
-    }
+    const userId = await resolveUserId();
+    const storage = await getStorageProvider();
 
-    await setSupabaseAuth(auth.accessToken, auth.refreshToken);
-
-    const sessions = await listSessions({
-      userId: auth.userId,
+    const sessions = await storage.listSessions({
+      userId,
       project: opts.project,
       tool: opts.tool,
       limit: parseInt(opts.limit, 10),
@@ -173,6 +217,7 @@ program
 
     if (sessions.length === 0) {
       console.log("No sessions found.");
+      await resetProviders();
       return;
     }
 
@@ -181,6 +226,8 @@ program
       console.log(`${s.startedAt} | ${s.tool} | ${s.project ?? "no project"} | ${s.chainCount} chains`);
       if (s.summary) console.log(`  ${s.summary}`);
     }
+
+    await resetProviders();
   });
 
 // ---- Init ----
@@ -243,23 +290,20 @@ program
   .command("mcp")
   .description("Start the MCP server (for AI tool integration)")
   .action(async () => {
-    // Import and run the MCP server
     await import("./mcp/server.ts");
   });
 
-// ---- Sync ----
+// ---- Sync (cloud-only) ----
 
 program
   .command("sync")
-  .description("Manually sync pending items to Supabase")
+  .description("Manually sync pending items to Supabase (cloud mode only)")
   .action(async () => {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.error("Not authenticated. Run 'sessiongraph login' first.");
-      process.exit(1);
-    }
+    requireCloudMode("sync");
+    await resolveUserId(); // sets up auth
 
-    await setSupabaseAuth(auth.accessToken, auth.refreshToken);
+    const { syncToSupabase } = await import("./storage/sync.ts");
+    const { getPendingCount } = await import("./storage/buffer.ts");
 
     let pending = getPendingCount();
     if (pending === 0) {
@@ -279,9 +323,7 @@ program
       const remaining = getPendingCount();
       console.log(`  Batch: synced ${result.synced}, failed ${result.failed} | Total: synced ${totalSynced}, remaining ${remaining}`);
 
-      // If nothing was synced and nothing failed, we're stuck
       if (result.synced === 0 && result.failed === 0) break;
-      // If everything failed this round, stop to avoid infinite loop
       if (result.synced === 0 && result.failed > 0) break;
 
       pending = remaining;

@@ -254,7 +254,7 @@ export class PGliteStorageProvider implements StorageProvider {
 
   async searchReasoning(opts: SearchReasoningOpts): Promise<RecallResult[]> {
     const db = await this.getDb();
-    const threshold = opts.matchThreshold ?? 0.7;
+    const threshold = opts.matchThreshold ?? 0.3;
     const limit = opts.limit ?? 10;
 
     const embeddingStr = `[${opts.queryEmbedding.join(",")}]`;
