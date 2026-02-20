@@ -3,6 +3,7 @@ import { join } from "path";
 import { config } from "../config/config.ts";
 import { getStorageProvider, getEmbeddingProvider } from "../storage/provider.ts";
 import { extractWithOllama } from "./ollama-extractor.ts";
+import type { OllamaOptions } from "./ollama-extractor.ts";
 import {
   isOpenCodeAvailable,
   getNewSessions as getOpenCodeSessions,
@@ -26,6 +27,10 @@ export interface BackfillOptions {
   since?: number;
   /** Maximum sessions to process in this run */
   limit?: number;
+  /** Delay in milliseconds between processing sessions (default: 2000) */
+  delayMs?: number;
+  /** Ollama runtime options for resource throttling */
+  ollamaOptions?: Omit<OllamaOptions, "model" | "baseUrl">;
   /** Callback for progress updates */
   onProgress?: (progress: BackfillProgress) => void;
 }
@@ -213,6 +218,10 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
   }
 
   const total = sessions.length;
+  const delayMs = opts?.delayMs ?? 2000;
+  const ollamaOpts: OllamaOptions = {
+    ...(opts?.ollamaOptions ?? {}),
+  };
 
   for (let i = 0; i < sessions.length; i++) {
     const entry = sessions[i]!;
@@ -235,7 +244,7 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       }
 
       // Extract reasoning chains via Ollama
-      const chains = await extractWithOllama(parsed.conversationText);
+      const chains = await extractWithOllama(parsed.conversationText, ollamaOpts);
 
       // Mark as backfilled even if no chains found
       if (chains.length === 0) {
@@ -297,6 +306,11 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
         err instanceof Error ? err.message : String(err);
       result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}`);
       console.error(`[backfill] Error processing session ${entry.id}:`, message);
+    }
+
+    // Throttle: pause between sessions to keep system responsive
+    if (delayMs > 0 && i < sessions.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 

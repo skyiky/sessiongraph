@@ -199,11 +199,27 @@ program
   .description("Backfill reasoning chains from past sessions using Ollama")
   .option("-t, --tool <tool>", "Only process sessions from this tool (opencode, claude-code)")
   .option("-l, --limit <number>", "Maximum sessions to process")
+  .option("-d, --delay <seconds>", "Delay between sessions in seconds (default: 2)", "2")
+  .option("--threads <number>", "Limit CPU threads for Ollama inference")
+  .option("--cpu-only", "Run on CPU only (no GPU)")
   .action(async (opts) => {
+    const delayMs = parseFloat(opts.delay) * 1000;
+    const ollamaOptions: Record<string, number> = {};
+    if (opts.threads) ollamaOptions.numThread = parseInt(opts.threads, 10);
+    if (opts.cpuOnly) ollamaOptions.numGpu = 0;
+
     console.log("Starting backfill...");
+    console.log(`  Delay: ${opts.delay}s between sessions`);
+    if (opts.threads) console.log(`  CPU threads: ${opts.threads}`);
+    if (opts.cpuOnly) console.log(`  Mode: CPU-only (no GPU)`);
+    if (opts.limit) console.log(`  Limit: ${opts.limit} sessions`);
+    if (opts.tool) console.log(`  Tool: ${opts.tool}`);
+
     const result = await runBackfill({
       tool: opts.tool,
       limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+      delayMs,
+      ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
       onProgress: (progress) => {
         const pct = Math.round((progress.current / progress.total) * 100);
         process.stdout.write(

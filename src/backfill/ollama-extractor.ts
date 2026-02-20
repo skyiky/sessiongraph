@@ -47,9 +47,20 @@ const VALID_TYPES = new Set<string>(["decision", "exploration", "rejection", "so
  * Calls the local Ollama server with the extraction prompt and parses
  * the structured JSON response into validated ExtractedChain objects.
  */
+export interface OllamaOptions {
+  model?: string;
+  baseUrl?: string;
+  /** Limit CPU threads used by Ollama (lower = less system impact) */
+  numThread?: number;
+  /** Number of GPU layers to offload (0 = CPU-only) */
+  numGpu?: number;
+  /** Context window size in tokens (default: 4096) */
+  numCtx?: number;
+}
+
 export async function extractWithOllama(
   conversationText: string,
-  opts?: { model?: string; baseUrl?: string },
+  opts?: OllamaOptions,
 ): Promise<ExtractedChain[]> {
   const model = opts?.model ?? config.ollama.chatModel;
   const baseUrl = opts?.baseUrl ?? config.ollama.baseUrl;
@@ -75,6 +86,11 @@ export async function extractWithOllama(
           },
         ],
         stream: false,
+        options: {
+          ...(opts?.numThread != null && { num_thread: opts.numThread }),
+          ...(opts?.numGpu != null && { num_gpu: opts.numGpu }),
+          num_ctx: opts?.numCtx ?? 4096,
+        },
       }),
     });
   } catch (error: unknown) {
