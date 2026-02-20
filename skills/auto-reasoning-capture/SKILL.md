@@ -39,3 +39,16 @@ Do not call `sessiongraph_remember` for:
 ## Quality Over Quantity
 
 A good session captures 2-6 chains. If you're capturing 10+, you're being too noisy. If you're capturing 0, you're missing reasoning. Aim for chains that would be genuinely useful to recall 3 months from now.
+
+## End-of-Session Sweep
+
+When the session is ending — user says goodbye, conversation wrapping up, final message — do a silent sweep of the session's key moments. Review: were there significant decisions, rejections, solutions, or insights that weren't captured during the flow of work?
+
+If yes, call `sessiongraph_remember` for each missed chain. Typically 1-2 at most.
+
+Rules:
+
+- **Completely silent.** No "let me do a final sweep" or "capturing some last reasoning." Just call the tool.
+- If context compaction happened during the session, pay extra attention — reasoning from early in the session may have been lost in the compaction.
+- Do NOT re-capture things already captured. Do NOT pad with low-quality chains to make the session look "complete."
+- If nothing was missed, do nothing. A sweep that captures 0 chains is perfectly fine.

@@ -10,6 +10,10 @@ import {
 import { REASONING_TYPES } from "../config/types.ts";
 import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
+import { isOpenCodeAvailable, getNewSessions as getOpenCodeSessions, parseSession as parseOpenCodeSession } from "../ingestion/parsers/opencode.ts";
+import { isClaudeCodeAvailable, getNewSessions as getClaudeCodeSessions, parseSession as parseClaudeCodeSession } from "../ingestion/parsers/claude-code.ts";
 
 const server = new McpServer({
   name: "sessiongraph",
@@ -266,6 +270,158 @@ server.registerTool(
         {
           type: "text" as const,
           text: `Sessions (${sessions.length}):\n\n${formatted}`,
+        },
+      ],
+    };
+  }
+);
+
+// ---- Backfill state helpers ----
+
+const BACKFILL_STATE_PATH = join(config.paths.dataDir, "backfill-state.json");
+
+function loadBackfillState(): { backfilledSessionIds: string[] } {
+  try {
+    if (existsSync(BACKFILL_STATE_PATH)) {
+      return JSON.parse(readFileSync(BACKFILL_STATE_PATH, "utf-8"));
+    }
+  } catch {}
+  return { backfilledSessionIds: [] };
+}
+
+function saveBackfillState(state: { backfilledSessionIds: string[] }): void {
+  const dir = config.paths.dataDir;
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(BACKFILL_STATE_PATH, JSON.stringify(state, null, 2));
+}
+
+// ---- Tool: get_sessions_to_backfill ----
+server.registerTool(
+  "get_sessions_to_backfill",
+  {
+    description:
+      "Get a batch of past AI coding sessions that haven't been backfilled yet. Returns session conversation text for you to read and extract reasoning chains from using the remember tool.",
+    inputSchema: z.object({
+      limit: z.number().default(3).describe("Number of sessions to return in this batch (keep small to stay within context)"),
+      tool: z.enum(["opencode", "claude-code"]).optional().describe("Filter to a specific AI tool"),
+    }),
+  },
+  async (input) => {
+    await ensureReady();
+
+    const state = loadBackfillState();
+    const backfilledSet = new Set(state.backfilledSessionIds);
+
+    // Collect sessions from available parsers
+    const candidates: Array<{
+      id: string;
+      tool: string;
+      project: string;
+      startedAt: string;
+    }> = [];
+
+    if ((!input.tool || input.tool === "opencode") && isOpenCodeAvailable()) {
+      const sessions = getOpenCodeSessions();
+      for (const s of sessions) {
+        if (!backfilledSet.has(s.id)) {
+          candidates.push({
+            id: s.id,
+            tool: "opencode",
+            project: s.projectPath,
+            startedAt: new Date(s.createdAt).toISOString(),
+          });
+        }
+      }
+    }
+
+    if ((!input.tool || input.tool === "claude-code") && isClaudeCodeAvailable()) {
+      const sessions = getClaudeCodeSessions();
+      for (const s of sessions) {
+        if (!backfilledSet.has(s.id)) {
+          candidates.push({
+            id: s.id,
+            tool: "claude-code",
+            project: s.project,
+            startedAt: new Date(s.startedAt).toISOString(),
+          });
+        }
+      }
+    }
+
+    if (candidates.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "No sessions to backfill. All sessions have already been processed.",
+          },
+        ],
+      };
+    }
+
+    // Take first `limit` sessions
+    const batch = candidates.slice(0, input.limit);
+    const parts: string[] = [];
+
+    for (const candidate of batch) {
+      let conversationText = "";
+
+      if (candidate.tool === "opencode") {
+        const parsed = parseOpenCodeSession(candidate.id);
+        conversationText = parsed?.conversationText ?? "[Could not parse session]";
+      } else if (candidate.tool === "claude-code") {
+        const parsed = parseClaudeCodeSession(candidate.id);
+        conversationText = parsed?.conversationText ?? "[Could not parse session]";
+      }
+
+      parts.push(
+        `=== Session: ${candidate.id} ===\n` +
+        `Tool: ${candidate.tool}\n` +
+        `Project: ${candidate.project}\n` +
+        `Started: ${candidate.startedAt}\n\n` +
+        `${conversationText}\n\n` +
+        `---`
+      );
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Found ${candidates.length} sessions to backfill. Returning batch of ${batch.length}:\n\n${parts.join("\n\n")}`,
+        },
+      ],
+    };
+  }
+);
+
+// ---- Tool: mark_session_backfilled ----
+server.registerTool(
+  "mark_session_backfilled",
+  {
+    description:
+      "Mark a session as backfilled after you've extracted and remembered its reasoning chains. Call this after processing each session from get_sessions_to_backfill.",
+    inputSchema: z.object({
+      sessionId: z.string().describe("The session ID to mark as backfilled"),
+    }),
+  },
+  async (input) => {
+    const state = loadBackfillState();
+
+    // Deduplicate
+    if (!state.backfilledSessionIds.includes(input.sessionId)) {
+      state.backfilledSessionIds.push(input.sessionId);
+    }
+
+    saveBackfillState(state);
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Marked session ${input.sessionId} as backfilled. Total backfilled sessions: ${state.backfilledSessionIds.length}`,
         },
       ],
     };

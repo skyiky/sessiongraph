@@ -110,16 +110,20 @@ export async function getStorageProvider(): Promise<StorageProvider> {
 /**
  * Get the embedding provider (singleton, lazily initialized).
  * For cloud mode: uses Supabase Edge Function.
- * For local mode: uses Supabase Edge Function as fallback (Ollama coming in Phase 1.2).
+ * For local mode: uses Ollama local embeddings.
  */
 export async function getEmbeddingProvider(): Promise<EmbeddingProvider> {
   if (embeddingProvider) return embeddingProvider;
 
-  // For now, both modes use Supabase Edge Function for embeddings.
-  // Ollama local embeddings will be added in Phase 1.2.
-  // When Ollama is available: local mode will prefer Ollama, fall back to Supabase.
-  const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
-  embeddingProvider = new SupabaseEmbeddingProvider();
+  const mode = config.storage.mode;
+
+  if (mode === "local") {
+    const { OllamaEmbeddingProvider } = await import("../embeddings/ollama.ts");
+    embeddingProvider = new OllamaEmbeddingProvider();
+  } else {
+    const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
+    embeddingProvider = new SupabaseEmbeddingProvider();
+  }
 
   return embeddingProvider;
 }

@@ -5,6 +5,8 @@ import { setSupabaseAuth, searchReasoning, generateEmbedding, listSessions } fro
 import { syncToSupabase, getSyncStatus } from "./storage/sync.ts";
 import { ingestOpenCodeSessions } from "./ingestion/pipeline.ts";
 import { getPendingCount } from "./storage/buffer.ts";
+import { runInit } from "./cli/init.ts";
+import { runBackfill } from "./backfill/backfill.ts";
 
 const program = new Command();
 
@@ -178,6 +180,44 @@ program
     for (const s of sessions) {
       console.log(`${s.startedAt} | ${s.tool} | ${s.project ?? "no project"} | ${s.chainCount} chains`);
       if (s.summary) console.log(`  ${s.summary}`);
+    }
+  });
+
+// ---- Init ----
+
+program
+  .command("init")
+  .description("Set up SessionGraph (detect tools, configure storage, install skills)")
+  .action(async () => {
+    await runInit();
+  });
+
+// ---- Backfill ----
+
+program
+  .command("backfill")
+  .description("Backfill reasoning chains from past sessions using Ollama")
+  .option("-t, --tool <tool>", "Only process sessions from this tool (opencode, claude-code)")
+  .option("-l, --limit <number>", "Maximum sessions to process")
+  .action(async (opts) => {
+    console.log("Starting backfill...");
+    const result = await runBackfill({
+      tool: opts.tool,
+      limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+      onProgress: (progress) => {
+        const pct = Math.round((progress.current / progress.total) * 100);
+        process.stdout.write(
+          `\r[${pct}%] ${progress.current}/${progress.total} — ` +
+          `${progress.tool}:${progress.sessionId.slice(0, 8)}… +${progress.chainsExtracted} chains`
+        );
+      },
+    });
+    process.stdout.write("\n");
+    console.log(`Done! Processed ${result.sessionsProcessed} sessions, extracted ${result.chainsExtracted} chains.`);
+    if (result.sessionsSkipped > 0) console.log(`Skipped ${result.sessionsSkipped} sessions (too short or empty).`);
+    if (result.errors.length > 0) {
+      console.log(`${result.errors.length} error(s):`);
+      for (const err of result.errors.slice(0, 5)) console.log(`  - ${err}`);
     }
   });
 

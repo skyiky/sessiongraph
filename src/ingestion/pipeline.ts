@@ -1,5 +1,5 @@
 import { parseNewSessions, type ParsedSession } from "./parsers/opencode.ts";
-import { extractReasoningChains, extractReasoningChainsSimple } from "./extractor.ts";
+import { extractWithOllama } from "../backfill/ollama-extractor.ts";
 import { enqueue, enqueueBatch, getSyncState, setSyncState } from "../storage/buffer.ts";
 import { generateEmbedding, generateEmbeddings } from "../storage/supabase.ts";
 import type { ReasoningChain, Session, SessionChunk } from "../config/types.ts";
@@ -86,13 +86,8 @@ export async function ingestOpenCodeSessions(userId: string): Promise<{
       }));
       enqueueBatch(chunkItems.filter((c) => (c.data.content as string).trim().length > 0));
 
-      // Extract reasoning chains
-      let chains = await extractReasoningChains(parsed.conversationText);
-      
-      // Fallback to simple extraction if LLM extraction returned nothing
-      if (chains.length === 0) {
-        chains = extractReasoningChainsSimple(parsed.conversationText);
-      }
+      // Extract reasoning chains via Ollama
+      const chains = await extractWithOllama(parsed.conversationText);
 
       if (chains.length === 0) {
         console.error(`[ingest] No reasoning chains found in session ${parsed.session.id}`);

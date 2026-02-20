@@ -63,6 +63,11 @@ export const config = {
     model: "gte-small",
     dimensions: 384,
   },
+  ollama: {
+    baseUrl: process.env.SESSIONGRAPH_OLLAMA_URL ?? "http://localhost:11434",
+    embeddingModel: process.env.SESSIONGRAPH_OLLAMA_EMBEDDING_MODEL ?? "all-minilm",
+    chatModel: process.env.SESSIONGRAPH_OLLAMA_CHAT_MODEL ?? "llama3.1:8b",
+  },
 } as const;
 
 export type Config = typeof config;
