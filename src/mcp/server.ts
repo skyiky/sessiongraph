@@ -2,36 +2,58 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 import {
-  searchReasoning,
-  insertReasoningChain,
-  getTimeline,
-  listSessions,
-  generateEmbedding,
-  setSupabaseAuth,
-} from "../storage/supabase.ts";
+  getStorageProvider,
+  getEmbeddingProvider,
+  type StorageProvider,
+  type EmbeddingProvider,
+} from "../storage/provider.ts";
 import { REASONING_TYPES } from "../config/types.ts";
+import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
 
 const server = new McpServer({
   name: "sessiongraph",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 let currentUserId: string | null = null;
+let storage: StorageProvider | null = null;
+let embeddings: EmbeddingProvider | null = null;
 
-async function ensureAuth(): Promise<string> {
-  if (currentUserId) return currentUserId;
+/**
+ * Ensure providers are initialized and auth is set up.
+ * - Local mode: no auth needed, uses fixed local user ID.
+ * - Cloud mode: loads auth.json and sets Supabase session.
+ */
+async function ensureReady(): Promise<{ userId: string; storage: StorageProvider; embeddings: EmbeddingProvider }> {
+  // Initialize providers lazily
+  if (!storage) storage = await getStorageProvider();
+  if (!embeddings) embeddings = await getEmbeddingProvider();
 
-  const auth = await loadAuth();
-  if (!auth) {
-    throw new Error(
-      "Not authenticated. Run 'sessiongraph login' first."
-    );
+  if (currentUserId) {
+    return { userId: currentUserId, storage, embeddings };
   }
 
-  await setSupabaseAuth(auth.accessToken, auth.refreshToken);
-  currentUserId = auth.userId;
-  return currentUserId;
+  if (config.storage.mode === "local") {
+    // Local mode: no auth, fixed user ID
+    currentUserId = "00000000-0000-0000-0000-000000000000";
+  } else {
+    // Cloud mode: authenticate with Supabase
+    const auth = await loadAuth();
+    if (!auth) {
+      throw new Error("Not authenticated. Run 'sessiongraph login' first.");
+    }
+
+    // Set auth on the Supabase provider
+    const { SupabaseStorageProvider } = await import("../storage/supabase-provider.ts");
+    if (storage instanceof SupabaseStorageProvider) {
+      await storage.setAuth(auth.accessToken, auth.refreshToken);
+    }
+
+    currentUserId = auth.userId;
+  }
+
+  return { userId: currentUserId, storage, embeddings };
 }
 
 // ---- Tool: remember ----
@@ -49,13 +71,13 @@ server.registerTool(
     }),
   },
   async (input) => {
-    const userId = await ensureAuth();
+    const { userId, storage, embeddings } = await ensureReady();
 
     // Generate embedding for the content
     const embeddingText = `${input.title}\n${input.content}`;
-    const embedding = await generateEmbedding(embeddingText);
+    const embedding = await embeddings.generateEmbedding(embeddingText);
 
-    const id = await insertReasoningChain({
+    const id = await storage.insertReasoningChain({
       sessionId: null, // No session for explicit remember calls
       userId,
       type: input.type,
@@ -90,12 +112,12 @@ server.registerTool(
     }),
   },
   async (input) => {
-    const userId = await ensureAuth();
+    const { userId, storage, embeddings } = await ensureReady();
 
     // Generate embedding for the query
-    const queryEmbedding = await generateEmbedding(input.query);
+    const queryEmbedding = await embeddings.generateEmbedding(input.query);
 
-    const results = await searchReasoning({
+    const results = await storage.searchReasoning({
       queryEmbedding,
       userId,
       project: input.project,
@@ -149,9 +171,9 @@ server.registerTool(
     }),
   },
   async (input) => {
-    const userId = await ensureAuth();
+    const { userId, storage } = await ensureReady();
 
-    const entries = await getTimeline({
+    const entries = await storage.getTimeline({
       userId,
       project: input.project,
       since: input.since,
@@ -209,9 +231,9 @@ server.registerTool(
     }),
   },
   async (input) => {
-    const userId = await ensureAuth();
+    const { userId, storage } = await ensureReady();
 
-    const sessions = await listSessions({
+    const sessions = await storage.listSessions({
       userId,
       project: input.project,
       tool: input.tool,
@@ -254,7 +276,9 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("SessionGraph MCP server running on stdio");
+  console.error(
+    `SessionGraph MCP server running on stdio (${config.storage.mode} mode)`
+  );
 }
 
 main().catch((err) => {
