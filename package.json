@@ -1,0 +1,25 @@
+{
+  "name": "sessiongraph",
+  "version": "0.1.0",
+  "description": "Never lose the reasoning behind an AI-assisted decision again.",
+  "module": "src/index.ts",
+  "type": "module",
+  "bin": {
+    "sessiongraph": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "mcp": "bun run src/mcp/server.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.9",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@supabase/supabase-js": "^2.97.0",
+    "commander": "^14.0.3",
+    "zod": "^4.3.6"
+  }
+}
