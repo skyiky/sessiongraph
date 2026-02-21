@@ -192,7 +192,7 @@ export class SupabaseStorageProvider implements StorageProvider {
       query_embedding: opts.queryEmbedding,
       filter_user_id: opts.userId,
       filter_project: opts.project ?? null,
-      match_threshold: opts.matchThreshold ?? 0.3,
+      match_threshold: opts.matchThreshold ?? 0.5,
       match_count: opts.limit ?? 10,
     });
 
