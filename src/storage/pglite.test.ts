@@ -137,7 +137,7 @@ describe("PGliteStorageProvider", () => {
 
   test("insertReasoningChain inserts a chain with embedding", async () => {
     // Create a fake 768-dim embedding
-    const embedding = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.1));
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1));
 
     const id = await provider.insertReasoningChain({
       sessionId: "test-session-1",
@@ -153,8 +153,8 @@ describe("PGliteStorageProvider", () => {
   });
 
   test("insertReasoningChains batch inserts", async () => {
-    const embedding1 = Array.from({ length: 768 }, (_, i) => Math.cos(i * 0.1));
-    const embedding2 = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.2));
+    const embedding1 = Array.from({ length: 1024 }, (_, i) => Math.cos(i * 0.1));
+    const embedding2 = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.2));
 
     const ids = await provider.insertReasoningChains([
       {
@@ -193,7 +193,7 @@ describe("PGliteStorageProvider", () => {
 
   test("searchReasoning finds similar chains", async () => {
     // Query with a vector similar to the "PGlite supports pgvector" chain
-    const queryEmbedding = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
 
     const results = await provider.searchReasoning({
       queryEmbedding,
@@ -211,7 +211,7 @@ describe("PGliteStorageProvider", () => {
   test("searchReasoning respects threshold", async () => {
     // Use a vector orthogonal/dissimilar to seeded ones — should match nothing at high threshold
     // Alternating +1/-1 pattern is dissimilar to sin/cos patterns
-    const queryEmbedding = Array.from({ length: 768 }, (_, i) => (i % 2 === 0 ? 1 : -1));
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => (i % 2 === 0 ? 1 : -1));
 
     const results = await provider.searchReasoning({
       queryEmbedding,
@@ -224,7 +224,7 @@ describe("PGliteStorageProvider", () => {
   });
 
   test("searchReasoning filters by project", async () => {
-    const queryEmbedding = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.2));
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.2));
 
     const results = await provider.searchReasoning({
       queryEmbedding,
@@ -290,7 +290,7 @@ describe("PGliteStorageProvider", () => {
   // ---- Chain without session (remember tool) ----
 
   test("insertReasoningChain works without sessionId", async () => {
-    const embedding = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.3));
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.3));
 
     const id = await provider.insertReasoningChain({
       sessionId: null,
@@ -305,7 +305,7 @@ describe("PGliteStorageProvider", () => {
     expect(id).toBeTruthy();
 
     // Should be findable via search (no session filter)
-    const queryEmbedding = Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.3) + 0.001);
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.3) + 0.001);
     const results = await provider.searchReasoning({
       queryEmbedding,
       userId: LOCAL_USER_ID,

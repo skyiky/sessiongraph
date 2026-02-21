@@ -36,11 +36,11 @@ If the conversation contains no extractable reasoning chains, return an empty ar
 
 IMPORTANT: Return ONLY valid JSON. No markdown code fences, no explanation, just the JSON array.`;
 
-/** Max chars to send to Ollama (~5k tokens at ~4 chars/token) */
-const MAX_CONVERSATION_LENGTH = 20_000;
+/** Max chars to send to Ollama. qwen3:4b supports 256K context — we use ~80K chars (~20K tokens) */
+const MAX_CONVERSATION_LENGTH = 80_000;
 
-/** Timeout for chat/extraction requests (120 seconds — LLM inference is slow) */
-const CHAT_TIMEOUT_MS = 120_000;
+/** Timeout for chat/extraction requests (180 seconds — larger context needs more time) */
+const CHAT_TIMEOUT_MS = 180_000;
 
 const VALID_TYPES = new Set<string>(["decision", "exploration", "rejection", "solution", "insight"]);
 
@@ -92,7 +92,7 @@ export async function extractWithOllama(
         options: {
           ...(opts?.numThread != null && { num_thread: opts.numThread }),
           ...(opts?.numGpu != null && { num_gpu: opts.numGpu }),
-          num_ctx: opts?.numCtx ?? 4096,
+          num_ctx: opts?.numCtx ?? 32768,
         },
       }),
       signal: AbortSignal.timeout(CHAT_TIMEOUT_MS),

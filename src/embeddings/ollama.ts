@@ -9,11 +9,11 @@ interface OllamaEmbedResponse {
 const EMBED_TIMEOUT_MS = 30_000;
 
 /**
- * Generates embeddings via local Ollama server (nomic-embed-text, 768 dims).
+ * Generates embeddings via local Ollama server (qwen3-embedding:0.6b, 1024 dims).
  * Requires Ollama to be running locally with the embedding model pulled.
  */
 export class OllamaEmbeddingProvider implements EmbeddingProvider {
-  readonly dimensions = 768;
+  readonly dimensions = 1024;
 
   private get baseUrl(): string {
     return config.ollama.baseUrl;
