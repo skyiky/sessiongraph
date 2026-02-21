@@ -1,6 +1,6 @@
 # SessionGraph
 
-> Searchable reasoning history for AI agent sessions.
+> Never lose the reasoning behind an AI-assisted decision again.
 
 Your AI agent sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision with no idea why you chose this approach — or what alternatives you explored and rejected.
 
