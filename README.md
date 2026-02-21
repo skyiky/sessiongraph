@@ -1,8 +1,8 @@
 # SessionGraph
 
-> Searchable reasoning history for AI coding sessions.
+> Searchable reasoning history for AI agent sessions.
 
-Your AI coding sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision with no idea why you chose this approach — or what alternatives you explored and rejected.
+Your AI agent sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision with no idea why you chose this approach — or what alternatives you explored and rejected.
 
 SessionGraph captures reasoning chains from your AI coding sessions and makes them semantically searchable.
 
@@ -108,7 +108,7 @@ Relations are created automatically via `sessiongraph link` or manually when cal
 sessiongraph init             # interactive setup (one time)
 sessiongraph search "query"   # search your reasoning history
 sessiongraph sessions         # list recent sessions
-sessiongraph timeline         # show recent activity
+sessiongraph timeline         # show recent activity (MCP only)
 sessiongraph backfill         # extract reasoning from past sessions
 sessiongraph link             # auto-link related chains via embeddings
 sessiongraph login            # authenticate for cloud sync

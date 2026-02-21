@@ -1,7 +1,7 @@
 {
   "name": "sessiongraph",
   "version": "0.2.0",
-  "description": "Searchable reasoning history for AI coding sessions. Captures decisions, explorations, rejections, and insights — makes them semantically searchable.",
+  "description": "Searchable reasoning history for AI agent sessions. Captures decisions, explorations, rejections, and insights — makes them semantically searchable.",
   "module": "src/index.ts",
   "type": "module",
   "license": "MIT",

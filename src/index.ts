@@ -37,7 +37,7 @@ function parsePositiveNumber(value: string, flagName: string): number {
 program
   .name("sessiongraph")
   .description("Never lose the reasoning behind an AI-assisted decision again.")
-  .version("0.1.0");
+  .version("0.2.0");
 
 /**
  * Helper: require cloud mode for a command, exit with a clear error if local.
