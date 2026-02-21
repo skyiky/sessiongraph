@@ -33,6 +33,9 @@ const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
  * from corrupted or malicious embedding data.
  */
 function toVectorLiteral(embedding: number[]): string {
+  if (!Array.isArray(embedding)) {
+    throw new Error("Embedding must be an array");
+  }
   if (embedding.length === 0) {
     throw new Error("Embedding array must not be empty");
   }
@@ -298,37 +301,39 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chains.length === 0) return [];
     const db = await this.getDb();
 
-    const ids: string[] = [];
-    await db.exec("BEGIN");
-    try {
-      for (const chain of chains) {
-        const embeddingStr = chain.embedding
-          ? toVectorLiteral(chain.embedding)
-          : null;
+    // Build multi-row VALUES clause for a single INSERT (8 params per row)
+    const valueClauses: string[] = [];
+    const params: any[] = [];
+    let idx = 1;
 
-        const result = await db.query<{ id: string }>(
-          `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
-           RETURNING id`,
-          [
-            chain.sessionId ?? null,
-            LOCAL_USER_ID,
-            chain.type,
-            chain.title,
-            chain.content,
-            chain.context ?? null,
-            chain.tags,
-            embeddingStr,
-          ]
-        );
-        ids.push(result.rows[0]!.id);
-      }
-      await db.exec("COMMIT");
-    } catch (err) {
-      await db.exec("ROLLBACK");
-      throw err;
+    for (const chain of chains) {
+      const embeddingStr = chain.embedding
+        ? toVectorLiteral(chain.embedding)
+        : null;
+
+      valueClauses.push(
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector)`
+      );
+      params.push(
+        chain.sessionId ?? null,
+        LOCAL_USER_ID,
+        chain.type,
+        chain.title,
+        chain.content,
+        chain.context ?? null,
+        chain.tags,
+        embeddingStr,
+      );
     }
-    return ids;
+
+    const result = await db.query<{ id: string }>(
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding)
+       VALUES ${valueClauses.join(", ")}
+       RETURNING id`,
+      params
+    );
+
+    return result.rows.map((r) => r.id);
   }
 
   async searchReasoning(opts: SearchReasoningOpts): Promise<RecallResult[]> {
@@ -486,20 +491,21 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chunks.length === 0) return;
     const db = await this.getDb();
 
-    await db.exec("BEGIN");
-    try {
-      for (const chunk of chunks) {
-        await db.query(
-          `INSERT INTO session_chunks (session_id, user_id, role, content, chunk_index)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [chunk.sessionId, LOCAL_USER_ID, chunk.role, chunk.content, chunk.chunkIndex]
-        );
-      }
-      await db.exec("COMMIT");
-    } catch (err) {
-      await db.exec("ROLLBACK");
-      throw err;
+    // Build multi-row VALUES clause (5 params per row)
+    const valueClauses: string[] = [];
+    const params: any[] = [];
+    let idx = 1;
+
+    for (const chunk of chunks) {
+      valueClauses.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`);
+      params.push(chunk.sessionId, LOCAL_USER_ID, chunk.role, chunk.content, chunk.chunkIndex);
     }
+
+    await db.query(
+      `INSERT INTO session_chunks (session_id, user_id, role, content, chunk_index)
+       VALUES ${valueClauses.join(", ")}`,
+      params
+    );
   }
 
   // ---- Chain Relations ----
@@ -524,25 +530,27 @@ export class PGliteStorageProvider implements StorageProvider {
     if (relations.length === 0) return [];
     const db = await this.getDb();
 
-    const ids: string[] = [];
-    await db.exec("BEGIN");
-    try {
-      for (const relation of relations) {
-        const result = await db.query<{ id: string }>(
-          `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (source_chain_id, target_chain_id, relation_type) DO NOTHING
-           RETURNING id`,
-          [relation.sourceChainId, relation.targetChainId, relation.relationType]
-        );
-        ids.push(result.rows.length > 0 ? result.rows[0]!.id : "");
-      }
-      await db.exec("COMMIT");
-    } catch (err) {
-      await db.exec("ROLLBACK");
-      throw err;
+    // Build multi-row VALUES clause (3 params per row)
+    // Use DO UPDATE with no-op SET so RETURNING includes conflict rows too
+    const valueClauses: string[] = [];
+    const params: any[] = [];
+    let idx = 1;
+
+    for (const relation of relations) {
+      valueClauses.push(`($${idx++}, $${idx++}, $${idx++})`);
+      params.push(relation.sourceChainId, relation.targetChainId, relation.relationType);
     }
-    return ids;
+
+    const result = await db.query<{ id: string }>(
+      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
+       VALUES ${valueClauses.join(", ")}
+       ON CONFLICT (source_chain_id, target_chain_id, relation_type)
+       DO UPDATE SET relation_type = EXCLUDED.relation_type
+       RETURNING id`,
+      params
+    );
+
+    return result.rows.map((r) => r.id);
   }
 
   async getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]> {

@@ -121,19 +121,18 @@ export class SupabaseStorageProvider implements StorageProvider {
     const { data, error } = await query;
     if (error) throw new Error(`Failed to list sessions: ${error.message}`);
 
-    // Get chain counts
+    // Get chain counts — one HEAD request per session (returns count without row data)
     const sessionIds = data.map((s: any) => s.id);
-    const { data: counts } = await sb
-      .from("reasoning_chains")
-      .select("session_id")
-      .in("session_id", sessionIds);
-
     const countMap = new Map<string, number>();
-    if (counts) {
-      for (const c of counts as any[]) {
-        countMap.set(c.session_id, (countMap.get(c.session_id) ?? 0) + 1);
-      }
-    }
+    // Batch: fetch counts in parallel, HEAD-only (no row data transferred)
+    const countPromises = sessionIds.map(async (sid: string) => {
+      const { count } = await sb
+        .from("reasoning_chains")
+        .select("*", { count: "exact", head: true })
+        .eq("session_id", sid);
+      countMap.set(sid, count ?? 0);
+    });
+    await Promise.all(countPromises);
 
     return data.map((s: any) => ({
       id: s.id,

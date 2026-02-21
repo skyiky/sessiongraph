@@ -488,7 +488,7 @@ describe("PGliteStorageProvider", () => {
     ]);
 
     expect(ids.length).toBe(1);
-    expect(ids[0]).toBe(""); // duplicate → empty string
+    expect(ids[0]).toBeTruthy(); // duplicate → returns existing row's ID (no-op upsert)
   });
 
   test("getRelatedChains returns outgoing relations", async () => {

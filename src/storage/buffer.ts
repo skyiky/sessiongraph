@@ -11,6 +11,8 @@ export function getBufferDb(): Database {
     db.run("PRAGMA journal_mode = WAL;");
     db.run("PRAGMA busy_timeout = 5000;");
     initSchema(db);
+    // Ensure WAL is flushed on normal process exit
+    process.once("exit", () => { if (db) { db.close(); db = null; } });
   }
   return db;
 }

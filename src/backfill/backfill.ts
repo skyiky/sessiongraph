@@ -117,7 +117,8 @@ export function saveBackfillState(state: BackfillState): void {
 
 export function markSessionBackfilled(state: BackfillState, sessionId: string): void {
   state.backfilledSessionIds.push(sessionId);
-  saveBackfillState(state);
+  // State is saved periodically by the caller (every SAVE_INTERVAL sessions + on exit)
+  // to avoid O(N^2) disk writes across the full backfill run.
 }
 
 /**
@@ -135,6 +136,7 @@ function markSessionErrored(state: BackfillState, sessionId: string, error: stri
     state.backfilledSessionIds.push(sessionId);
   }
 
+  // Errors are saved immediately (they're rare and losing error state is worse)
   saveBackfillState(state);
   return newCount >= MAX_RETRIES;
 }
@@ -242,6 +244,9 @@ function collectSessions(opts?: BackfillOptions): SessionEntry[] {
 /** Max chains to embed in a single Ollama call */
 const EMBED_BATCH_SIZE = 50;
 
+/** How often to flush backfill state to disk (every N completed sessions) */
+const STATE_SAVE_INTERVAL = 10;
+
 /** Flag set by SIGINT handler to stop after current session completes */
 let interruptRequested = false;
 
@@ -306,132 +311,149 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
     });
   };
 
-  for (let i = 0; i < sessions.length; i++) {
-    // Check for graceful interrupt between sessions
-    if (interruptRequested) {
-      opts?.onStepProgress?.({
-        current: i + 1,
-        total,
-        sessionId: sessions[i]!.id,
-        tool: sessions[i]!.tool,
-        step: "done",
-        detail: "interrupted — progress saved, resume with `sessiongraph backfill`",
-      });
-      break;
-    }
+  let sessionsSinceLastSave = 0;
 
-    const entry = sessions[i]!;
-
-    try {
-      // ---- Step 1: Parse ----
-      emitStep(i, entry, "parsing");
-      const parsed = entry.parse();
-      if (!parsed) {
-        result.sessionsSkipped++;
-        markSessionBackfilled(state, entry.id);
-        emitStep(i, entry, "skipped", "unparseable");
-        continue;
+  try {
+    for (let i = 0; i < sessions.length; i++) {
+      // Check for graceful interrupt between sessions
+      if (interruptRequested) {
+        opts?.onStepProgress?.({
+          current: i + 1,
+          total,
+          sessionId: sessions[i]!.id,
+          tool: sessions[i]!.tool,
+          step: "done",
+          detail: "interrupted — progress saved, resume with `sessiongraph backfill`",
+        });
+        break;
       }
 
-      // Skip sessions that are too short
-      const minTurns = 4;
-      if (parsed.turnCount < minTurns) {
-        result.sessionsSkipped++;
-        markSessionBackfilled(state, entry.id);
-        emitStep(i, entry, "skipped", `only ${parsed.turnCount} turns`);
-        continue;
-      }
+      const entry = sessions[i]!;
 
-      // ---- Step 2: Extract reasoning chains via Ollama (chat model) ----
-      const charLen = parsed.conversationText.length;
-      emitStep(i, entry, "extracting", `${parsed.turnCount} turns, ${(charLen / 1000).toFixed(0)}k chars`);
-      const chains = await extractWithOllama(parsed.conversationText, ollamaOpts);
+      try {
+        // ---- Step 1: Parse ----
+        emitStep(i, entry, "parsing");
+        const parsed = entry.parse();
+        if (!parsed) {
+          result.sessionsSkipped++;
+          markSessionBackfilled(state, entry.id);
+          sessionsSinceLastSave++;
+          emitStep(i, entry, "skipped", "unparseable");
+          continue;
+        }
 
-      if (chains.length === 0) {
-        result.sessionsSkipped++;
+        // Skip sessions that are too short
+        const minTurns = 4;
+        if (parsed.turnCount < minTurns) {
+          result.sessionsSkipped++;
+          markSessionBackfilled(state, entry.id);
+          sessionsSinceLastSave++;
+          emitStep(i, entry, "skipped", `only ${parsed.turnCount} turns`);
+          continue;
+        }
+
+        // ---- Step 2: Extract reasoning chains via Ollama (chat model) ----
+        const charLen = parsed.conversationText.length;
+        emitStep(i, entry, "extracting", `${parsed.turnCount} turns, ${(charLen / 1000).toFixed(0)}k chars`);
+        const chains = await extractWithOllama(parsed.conversationText, ollamaOpts);
+
+        if (chains.length === 0) {
+          result.sessionsSkipped++;
+          markSessionBackfilled(state, entry.id);
+          sessionsSinceLastSave++;
+          emitStep(i, entry, "done", "0 chains (skipped)");
+          opts?.onProgress?.({
+            current: i + 1,
+            total,
+            sessionId: entry.id,
+            tool: entry.tool,
+            chainsExtracted: 0,
+          });
+          continue;
+        }
+
+        // ---- Step 3: Embed chains (embedding model) ----
+        emitStep(i, entry, "embedding", `${chains.length} chains`);
+        const texts = chains.map((c) => `${c.title}\n${c.content}`);
+        const chainEmbeddings: number[][] = [];
+        for (let bi = 0; bi < texts.length; bi += EMBED_BATCH_SIZE) {
+          const batch = texts.slice(bi, bi + EMBED_BATCH_SIZE);
+          const batchEmbeddings = await embeddings.generateEmbeddings(batch);
+          chainEmbeddings.push(...batchEmbeddings);
+        }
+
+        // ---- Step 4: Save to storage ----
+        emitStep(i, entry, "saving", `${chains.length} chains`);
+
+        const sessionData: Session = {
+          userId: LOCAL_USER_ID,
+          tool: entry.tool,
+          project: parsed.project,
+          startedAt: parsed.startedAt,
+          endedAt: parsed.endedAt,
+          summary: parsed.summary,
+          metadata: parsed.metadata,
+        };
+
+        const sessionId = await storage.upsertSession(sessionData);
+
+        const chainRecords: ReasoningChain[] = chains.map((chain, ci) => {
+          const embedding = chainEmbeddings[ci]?.length
+            ? chainEmbeddings[ci]
+            : undefined;
+
+          return {
+            sessionId,
+            userId: LOCAL_USER_ID,
+            type: chain.type,
+            title: chain.title,
+            content: chain.content,
+            tags: chain.tags,
+            embedding,
+          };
+        });
+
+        await storage.insertReasoningChains(chainRecords);
+
+        // ---- Step 5: Mark complete ----
+        result.sessionsProcessed++;
+        result.chainsExtracted += chains.length;
         markSessionBackfilled(state, entry.id);
-        emitStep(i, entry, "done", "0 chains (skipped)");
+        sessionsSinceLastSave++;
+
+        emitStep(i, entry, "done", `+${chains.length} chains`);
         opts?.onProgress?.({
           current: i + 1,
           total,
           sessionId: entry.id,
           tool: entry.tool,
-          chainsExtracted: 0,
+          chainsExtracted: chains.length,
         });
-        continue;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const exhausted = markSessionErrored(state, entry.id, message);
+        const retryCount = getErrorCount(state, entry.id);
+        const retryInfo = exhausted
+          ? ` (retry budget exhausted after ${retryCount} attempts — permanently skipped)`
+          : ` (attempt ${retryCount}/${MAX_RETRIES} — will retry on next run)`;
+        result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}${retryInfo}`);
+        emitStep(i, entry, "error", message.slice(0, 100));
       }
 
-      // ---- Step 3: Embed chains (embedding model) ----
-      emitStep(i, entry, "embedding", `${chains.length} chains`);
-      const texts = chains.map((c) => `${c.title}\n${c.content}`);
-      const chainEmbeddings: number[][] = [];
-      for (let bi = 0; bi < texts.length; bi += EMBED_BATCH_SIZE) {
-        const batch = texts.slice(bi, bi + EMBED_BATCH_SIZE);
-        const batchEmbeddings = await embeddings.generateEmbeddings(batch);
-        chainEmbeddings.push(...batchEmbeddings);
+      // Periodically flush state to disk (every STATE_SAVE_INTERVAL sessions)
+      if (sessionsSinceLastSave >= STATE_SAVE_INTERVAL) {
+        saveBackfillState(state);
+        sessionsSinceLastSave = 0;
       }
 
-      // ---- Step 4: Save to storage ----
-      emitStep(i, entry, "saving", `${chains.length} chains`);
-
-      const sessionData: Session = {
-        userId: LOCAL_USER_ID,
-        tool: entry.tool,
-        project: parsed.project,
-        startedAt: parsed.startedAt,
-        endedAt: parsed.endedAt,
-        summary: parsed.summary,
-        metadata: parsed.metadata,
-      };
-
-      const sessionId = await storage.upsertSession(sessionData);
-
-      const chainRecords: ReasoningChain[] = chains.map((chain, ci) => {
-        const embedding = chainEmbeddings[ci]?.length
-          ? chainEmbeddings[ci]
-          : undefined;
-
-        return {
-          sessionId,
-          userId: LOCAL_USER_ID,
-          type: chain.type,
-          title: chain.title,
-          content: chain.content,
-          tags: chain.tags,
-          embedding,
-        };
-      });
-
-      await storage.insertReasoningChains(chainRecords);
-
-      // ---- Step 5: Mark complete (atomically) ----
-      result.sessionsProcessed++;
-      result.chainsExtracted += chains.length;
-      markSessionBackfilled(state, entry.id);
-
-      emitStep(i, entry, "done", `+${chains.length} chains`);
-      opts?.onProgress?.({
-        current: i + 1,
-        total,
-        sessionId: entry.id,
-        tool: entry.tool,
-        chainsExtracted: chains.length,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const exhausted = markSessionErrored(state, entry.id, message);
-      const retryCount = getErrorCount(state, entry.id);
-      const retryInfo = exhausted
-        ? ` (retry budget exhausted after ${retryCount} attempts — permanently skipped)`
-        : ` (attempt ${retryCount}/${MAX_RETRIES} — will retry on next run)`;
-      result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}${retryInfo}`);
-      emitStep(i, entry, "error", message.slice(0, 100));
+      // Throttle between sessions to keep system responsive
+      if (delayMs > 0 && i < sessions.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
-
-    // Throttle between sessions to keep system responsive
-    if (delayMs > 0 && i < sessions.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
+  } finally {
+    // Always flush state on exit — covers normal completion, interrupts, and crashes
+    saveBackfillState(state);
   }
 
   return result;

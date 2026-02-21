@@ -67,9 +67,9 @@ export async function syncToSupabase(): Promise<{ synced: number; failed: number
 
 /**
  * Start a periodic sync loop.
- * Returns a cleanup function to stop the loop.
+ * Returns an async cleanup function that waits for any in-flight sync to finish.
  */
-export function startSyncLoop(): () => void {
+export function startSyncLoop(): () => Promise<void> {
   let running = true;
 
   const loop = async () => {
@@ -91,10 +91,11 @@ export function startSyncLoop(): () => void {
     }
   };
 
-  loop();
+  const loopPromise = loop();
 
-  return () => {
+  return async () => {
     running = false;
+    await loopPromise;
   };
 }
 

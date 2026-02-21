@@ -3,9 +3,12 @@ import { extractWithOllama } from "../backfill/ollama-extractor.ts";
 import { enqueue, enqueueBatch, getSyncState, setSyncState } from "../storage/buffer.ts";
 import { SupabaseEmbeddingProvider } from "../embeddings/supabase.ts";
 
-// Legacy pipeline uses Supabase Edge Function embeddings directly
-const _supabaseEmbeddings = new SupabaseEmbeddingProvider();
-const generateEmbeddings = (texts: string[]) => _supabaseEmbeddings.generateEmbeddings(texts);
+// Legacy pipeline uses Supabase Edge Function embeddings directly (lazy-init)
+let _supabaseEmbeddings: SupabaseEmbeddingProvider | null = null;
+const generateEmbeddings = (texts: string[]) => {
+  if (!_supabaseEmbeddings) _supabaseEmbeddings = new SupabaseEmbeddingProvider();
+  return _supabaseEmbeddings.generateEmbeddings(texts);
+};
 
 const SYNC_STATE_KEY = "opencode_last_sync";
 
