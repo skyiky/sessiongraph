@@ -6,6 +6,26 @@ Your AI coding sessions produce two things: code changes and the reasoning that 
 
 SessionGraph captures reasoning chains from your AI coding sessions and makes them semantically searchable.
 
+## Quick Start
+
+**Prerequisites:** [Bun](https://bun.sh) and [Ollama](https://ollama.com) installed.
+
+```bash
+# Clone and install
+git clone https://github.com/skyiky/sessiongraph.git
+cd sessiongraph
+bun install
+
+# Pull required models
+ollama pull qwen3-embedding:0.6b   # embeddings (639MB)
+ollama pull qwen2.5:3b              # extraction (1.9GB)
+
+# Interactive setup — detects your AI tools, configures MCP, offers backfill
+bun run src/index.ts init
+```
+
+That's it. The MCP server runs automatically when your AI tool starts a session.
+
 ## How Is This Different From CLAUDE.md?
 
 CLAUDE.md (or AGENTS.md, CONVENTIONS.md, etc.) is great for active instructions — things the agent should know right now. Some people even use auto-update skills to keep it maintained. SessionGraph solves a different problem.
@@ -53,16 +73,34 @@ Or the agent calls `recall("authentication strategy")` and gets back the full re
 
 ### MCP Tools
 
-Your AI agents get six tools via MCP:
+Your AI agents get seven tools via MCP:
 
 | Tool | What it does |
 |------|-------------|
-| `remember` | Save a reasoning chain (decision, insight, rejection, etc.) |
-| `recall` | Semantic search — "what do I know about X?" |
+| `remember` | Save a reasoning chain (decision, insight, rejection, etc.). Supports `related_to` for linking chains. |
+| `recall` | Semantic search — "what do I know about X?" Returns matching chains with IDs. |
 | `timeline` | Recent sessions with their reasoning chains, chronologically |
 | `sessions` | List past sessions, filterable by project or tool |
+| `graph` | Explore reasoning chain relations by chain ID |
 | `get_sessions_to_backfill` | Get unprocessed sessions for agent-driven backfill |
 | `mark_session_backfilled` | Mark a session as processed |
+
+### Reasoning Graph
+
+Chains aren't isolated — they connect to each other. SessionGraph tracks eight relation types:
+
+| Relation | Meaning |
+|----------|---------|
+| `leads_to` | A caused or motivated B |
+| `supersedes` | A replaces/overrides B |
+| `contradicts` | A and B conflict |
+| `builds_on` | A extends/deepens B |
+| `depends_on` | A only makes sense because of B |
+| `refines` | A narrows/improves B without replacing it |
+| `generalizes` | A abstracts B into a broader pattern |
+| `analogous_to` | Similar reasoning in different contexts |
+
+Relations are created automatically via `sessiongraph link` or manually when calling `remember` with a `related_to` parameter.
 
 ### CLI
 
@@ -72,6 +110,7 @@ sessiongraph search "query"   # search your reasoning history
 sessiongraph sessions         # list recent sessions
 sessiongraph timeline         # show recent activity
 sessiongraph backfill         # extract reasoning from past sessions
+sessiongraph link             # auto-link related chains via embeddings
 sessiongraph login            # authenticate for cloud sync
 sessiongraph status           # show sync status
 ```
@@ -139,4 +178,4 @@ SessionGraph captures five types of reasoning:
 
 ## License
 
-MIT
+[MIT](LICENSE)

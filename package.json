@@ -1,9 +1,31 @@
 {
   "name": "sessiongraph",
-  "version": "0.1.0",
-  "description": "Never lose the reasoning behind an AI-assisted decision again.",
+  "version": "0.2.0",
+  "description": "Searchable reasoning history for AI coding sessions. Captures decisions, explorations, rejections, and insights — makes them semantically searchable.",
   "module": "src/index.ts",
   "type": "module",
+  "license": "MIT",
+  "author": "David Zhang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skyiky/sessiongraph.git"
+  },
+  "homepage": "https://github.com/skyiky/sessiongraph",
+  "bugs": {
+    "url": "https://github.com/skyiky/sessiongraph/issues"
+  },
+  "keywords": [
+    "ai",
+    "reasoning",
+    "mcp",
+    "coding-sessions",
+    "semantic-search",
+    "pgvector",
+    "pglite",
+    "ollama",
+    "claude-code",
+    "opencode"
+  ],
   "bin": {
     "sessiongraph": "./src/index.ts"
   },

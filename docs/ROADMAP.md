@@ -1,6 +1,6 @@
 # SessionGraph Roadmap
 
-> Last updated: 2026-02-19
+> Last updated: 2026-02-21
 
 ## Guiding Principles
 
@@ -33,11 +33,11 @@ Everything built so far. Proves the concept works end-to-end.
 
 ---
 
-## Phase 1: Local-First Pivot (v0.2) — NEXT
+## Phase 1: Local-First Pivot (v0.2) — DONE
 
-*Target: 2-3 weeks*
+*Shipped: 2026-02-20*
 
-The biggest architectural change. Move from Supabase-required to fully local by default. This is what makes SessionGraph installable in 60 seconds with zero accounts.
+The biggest architectural change. Moved from Supabase-required to fully local by default. SessionGraph is now installable in 60 seconds with zero accounts.
 
 ### 1.1 PGlite as Default Storage
 
@@ -138,12 +138,29 @@ These are replaced by:
 The `ExtractedChain` interface stays — it's used by both new and old code.
 
 ### Phase 1 Definition of Done
-- [ ] `npx sessiongraph init` works end-to-end on a fresh machine
-- [ ] All data stored in PGlite by default, no Supabase account needed
-- [ ] `recall` returns semantically relevant results from local PGlite + Ollama embeddings
-- [ ] Backfill processes existing OpenCode + Claude Code sessions
-- [ ] `extractor.ts` contains only the `ExtractedChain` type, no extraction functions
-- [ ] Existing Supabase path still works when configured (cloud tier)
+- [x] `npx sessiongraph init` works end-to-end on a fresh machine
+- [x] All data stored in PGlite by default, no Supabase account needed
+- [x] `recall` returns semantically relevant results from local PGlite + Ollama embeddings
+- [x] Backfill processes existing OpenCode + Claude Code sessions
+- [x] `extractor.ts` contains only the `ExtractedChain` type, no extraction functions
+- [x] Existing Supabase path still works when configured (cloud tier)
+
+---
+
+## Phase 1.5: Reasoning Graph (v0.2.1) — DONE
+
+*Shipped: 2026-02-21*
+
+Chains aren't isolated — they form a graph of related reasoning. This phase adds the ability to link chains together and explore those connections.
+
+### What shipped
+- **chain_relations table** with 8 relation types: `leads_to`, `supersedes`, `contradicts`, `builds_on`, `depends_on`, `refines`, `generalizes`, `analogous_to`
+- **`remember` with `related_to`** — link a new chain to an existing one at creation time
+- **`graph` MCP tool** — explore chain relations by chain ID
+- **`recall` returns chain IDs** — so agents can reference specific chains
+- **Auto-linker engine** (`sessiongraph link`) — uses embedding similarity to discover and classify chain relations automatically via Ollama
+- **`listChainsWithEmbeddings`** in both PGlite and Supabase providers
+- **35 PGlite tests** (14 original + 18 relation + 3 listChainsWithEmbeddings)
 
 ---
 
@@ -244,12 +261,12 @@ Explicit anti-goals to avoid scope creep:
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-Things we'll decide when we have more data:
+Decisions made during Phase 1 development:
 
-1. **Embedding model for local:** `all-minilm` (384 dims, matches current schema) vs `nomic-embed-text` (768 dims, better quality, requires schema change)?
-2. **PGlite storage location:** `~/.sessiongraph/data/` (centralized) vs per-project (colocated)?
-3. **Backfill quality threshold:** How good does Ollama extraction need to be before we ship it? What's the minimum acceptable quality?
-4. **Claude Code session discovery:** Do we scan all projects or let the user specify which projects to backfill?
-5. **npm package scope:** `sessiongraph` (unscoped) vs `@sessiongraph/cli`?
+1. **Embedding model for local:** Chose `qwen3-embedding:0.6b` (1024 dims). Started with `all-minilm` (384), upgraded to `nomic-embed-text` (768), then settled on qwen3-embedding for best quality-to-size ratio at 639MB.
+2. **PGlite storage location:** `~/.sessiongraph/pglite/` (centralized). One database for all projects — cross-project search is a key differentiator.
+3. **Backfill quality threshold:** Acceptable for search. `qwen2.5:3b` with `format: "json"` produces structured chains at ~20 tok/s on a 4GB VRAM GPU. Not perfect, but fills the search index well enough.
+4. **Claude Code session discovery:** Scans all projects automatically. User can filter by project later via `recall` or `sessions`.
+5. **npm package scope:** `sessiongraph` (unscoped). Simpler, shorter, no org overhead.
