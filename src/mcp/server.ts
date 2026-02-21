@@ -7,7 +7,8 @@ import {
   type StorageProvider,
   type EmbeddingProvider,
 } from "../storage/provider.ts";
-import { REASONING_TYPES } from "../config/types.ts";
+import { REASONING_TYPES, RELATION_TYPES, BIDIRECTIONAL_RELATIONS } from "../config/types.ts";
+import type { RelationType } from "../config/types.ts";
 import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
@@ -72,6 +73,10 @@ server.registerTool(
       title: z.string().describe("A short title summarizing the reasoning (1 sentence)"),
       tags: z.array(z.string()).default([]).describe("Optional tags for categorization (e.g. 'database', 'architecture', 'performance')"),
       project: z.string().optional().describe("Project name or path this reasoning relates to"),
+      related_to: z.array(z.object({
+        chain_id: z.string().describe("ID of an existing reasoning chain to link to"),
+        relation: z.enum(RELATION_TYPES).describe("Type of relationship: leads_to, supersedes, contradicts, builds_on, depends_on, refines, generalizes, analogous_to"),
+      })).default([]).describe("Optional links to existing reasoning chains. Use chain IDs from recall results."),
     }),
   },
   async (input) => {
@@ -91,11 +96,39 @@ server.registerTool(
       embedding,
     });
 
+    // Create relations if specified
+    let relationsCreated = 0;
+    if (input.related_to.length > 0) {
+      const relations = [];
+      for (const link of input.related_to) {
+        // New chain is the source, existing chain is the target
+        relations.push({
+          sourceChainId: id,
+          targetChainId: link.chain_id,
+          relationType: link.relation as RelationType,
+        });
+        // For bidirectional relations, also store the reverse
+        if (BIDIRECTIONAL_RELATIONS.includes(link.relation as RelationType)) {
+          relations.push({
+            sourceChainId: link.chain_id,
+            targetChainId: id,
+            relationType: link.relation as RelationType,
+          });
+        }
+      }
+      await storage.insertChainRelations(relations);
+      relationsCreated = input.related_to.length;
+    }
+
+    const relationMsg = relationsCreated > 0
+      ? `\nLinked to ${relationsCreated} existing chain(s).`
+      : "";
+
     return {
       content: [
         {
           type: "text" as const,
-          text: `Remembered: "${input.title}" (${input.type})\nID: ${id}`,
+          text: `Remembered: "${input.title}" (${input.type})\nID: ${id}${relationMsg}`,
         },
       ],
     };
@@ -144,6 +177,7 @@ server.registerTool(
       .map(
         (r, i) =>
           `## ${i + 1}. [${r.type.toUpperCase()}] ${r.title}\n` +
+          `ID: ${r.id}\n` +
           `Similarity: ${(r.similarity * 100).toFixed(1)}%\n` +
           `${r.content}\n` +
           (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
@@ -270,6 +304,61 @@ server.registerTool(
         {
           type: "text" as const,
           text: `Sessions (${sessions.length}):\n\n${formatted}`,
+        },
+      ],
+    };
+  }
+);
+
+// ---- Tool: graph ----
+server.registerTool(
+  "graph",
+  {
+    description:
+      "Explore the reasoning graph — find chains related to a given chain by following relationship edges. Returns connected chains with their relationship types and directions. Use chain IDs from recall or remember results.",
+    inputSchema: z.object({
+      chain_id: z.string().describe("The ID of the reasoning chain to explore connections for"),
+      relation_type: z.enum(RELATION_TYPES).optional().describe("Filter to a specific relation type (e.g. 'builds_on', 'contradicts')"),
+      limit: z.number().default(20).describe("Maximum number of related chains to return"),
+    }),
+  },
+  async (input) => {
+    const { storage } = await ensureReady();
+
+    const results = await storage.getRelatedChains({
+      chainId: input.chain_id,
+      relationType: input.relation_type as RelationType | undefined,
+      limit: input.limit,
+    });
+
+    if (results.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No related chains found for chain ${input.chain_id}.`,
+          },
+        ],
+      };
+    }
+
+    const formatted = results
+      .map(
+        (r, i) =>
+          `## ${i + 1}. ${r.direction === "outgoing" ? "→" : "←"} [${r.relationType}] ${r.title}\n` +
+          `Chain ID: ${r.chainId}\n` +
+          `Type: ${r.type} | Direction: ${r.direction}\n` +
+          `${r.content}\n` +
+          (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
+          `Date: ${r.createdAt}`
+      )
+      .join("\n\n---\n\n");
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Found ${results.length} related chain(s) for ${input.chain_id}:\n\n${formatted}`,
         },
       ],
     };

@@ -7,16 +7,23 @@ import type {
   ListSessionsOpts,
   SearchReasoningOpts,
   TimelineOpts,
+  GetRelatedChainsOpts,
+  ListChainsWithEmbeddingsOpts,
 } from "./provider.ts";
 import type {
+  ChainRelation,
+  ChainWithEmbedding,
   ReasoningChain,
   ReasoningType,
   RecallResult,
+  RelatedChainResult,
+  RelationType,
   Session,
   SessionChunk,
   SessionListEntry,
   TimelineEntry,
 } from "../config/types.ts";
+import { RELATION_TYPES } from "../config/types.ts";
 
 /** Fixed user ID for local single-user mode. Keeps schema compatible with cloud sync. */
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -123,6 +130,21 @@ export class PGliteStorageProvider implements StorageProvider {
       );
     `);
 
+    // Chain relations table — reasoning graph edges
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS chain_relations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_chain_id UUID NOT NULL REFERENCES reasoning_chains(id) ON DELETE CASCADE,
+        target_chain_id UUID NOT NULL REFERENCES reasoning_chains(id) ON DELETE CASCADE,
+        relation_type TEXT NOT NULL CHECK (relation_type IN (
+          'leads_to', 'supersedes', 'contradicts', 'builds_on',
+          'depends_on', 'refines', 'generalizes', 'analogous_to'
+        )),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(source_chain_id, target_chain_id, relation_type)
+      );
+    `);
+
     // Indexes (use IF NOT EXISTS via exec — PGlite handles it)
     await db.exec(`
       CREATE INDEX IF NOT EXISTS idx_reasoning_embedding
@@ -143,6 +165,14 @@ export class PGliteStorageProvider implements StorageProvider {
     await db.exec(`
       CREATE INDEX IF NOT EXISTS idx_chunks_session
         ON session_chunks (session_id, chunk_index);
+    `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_relations_source
+        ON chain_relations (source_chain_id);
+    `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_relations_target
+        ON chain_relations (target_chain_id);
     `);
   }
 
@@ -468,4 +498,158 @@ export class PGliteStorageProvider implements StorageProvider {
       throw err;
     }
   }
+
+  // ---- Chain Relations ----
+
+  async insertChainRelation(relation: ChainRelation): Promise<string> {
+    const db = await this.getDb();
+
+    const result = await db.query<{ id: string }>(
+      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (source_chain_id, target_chain_id, relation_type) DO NOTHING
+       RETURNING id`,
+      [relation.sourceChainId, relation.targetChainId, relation.relationType]
+    );
+
+    // ON CONFLICT DO NOTHING returns no rows if duplicate — return empty string
+    if (result.rows.length === 0) return "";
+    return result.rows[0]!.id;
+  }
+
+  async insertChainRelations(relations: ChainRelation[]): Promise<string[]> {
+    if (relations.length === 0) return [];
+    const db = await this.getDb();
+
+    const ids: string[] = [];
+    await db.exec("BEGIN");
+    try {
+      for (const relation of relations) {
+        const result = await db.query<{ id: string }>(
+          `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (source_chain_id, target_chain_id, relation_type) DO NOTHING
+           RETURNING id`,
+          [relation.sourceChainId, relation.targetChainId, relation.relationType]
+        );
+        ids.push(result.rows.length > 0 ? result.rows[0]!.id : "");
+      }
+      await db.exec("COMMIT");
+    } catch (err) {
+      await db.exec("ROLLBACK");
+      throw err;
+    }
+    return ids;
+  }
+
+  async getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]> {
+    const db = await this.getDb();
+    const limit = opts.limit ?? 20;
+
+    // Query both directions: chains this one points to (outgoing) and chains pointing to this one (incoming)
+    let typeFilter = "";
+    const params: any[] = [opts.chainId, limit];
+    let paramIdx = 3;
+
+    if (opts.relationType) {
+      typeFilter = `AND cr.relation_type = $${paramIdx++}`;
+      params.push(opts.relationType);
+    }
+
+    const result = await db.query<{
+      chain_id: string;
+      relation_type: string;
+      direction: string;
+      title: string;
+      type: string;
+      content: string;
+      tags: string[];
+      created_at: string;
+    }>(
+      `SELECT
+         rc.id AS chain_id,
+         cr.relation_type,
+         'outgoing' AS direction,
+         rc.title,
+         rc.type,
+         rc.content,
+         rc.tags,
+         rc.created_at
+       FROM chain_relations cr
+       JOIN reasoning_chains rc ON rc.id = cr.target_chain_id
+       WHERE cr.source_chain_id = $1 ${typeFilter}
+
+       UNION ALL
+
+       SELECT
+         rc.id AS chain_id,
+         cr.relation_type,
+         'incoming' AS direction,
+         rc.title,
+         rc.type,
+         rc.content,
+         rc.tags,
+         rc.created_at
+       FROM chain_relations cr
+       JOIN reasoning_chains rc ON rc.id = cr.source_chain_id
+       WHERE cr.target_chain_id = $1 ${typeFilter}
+
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      params
+    );
+
+    return result.rows.map((r) => ({
+      chainId: r.chain_id,
+      relationType: r.relation_type as RelationType,
+      direction: r.direction as "outgoing" | "incoming",
+      title: r.title,
+      type: r.type as ReasoningType,
+      content: r.content,
+      tags: r.tags ?? [],
+      createdAt: r.created_at,
+    }));
+  }
+
+  // ---- Batch / Linking ----
+
+  async listChainsWithEmbeddings(opts: ListChainsWithEmbeddingsOpts): Promise<ChainWithEmbedding[]> {
+    const db = await this.getDb();
+    const limit = opts.limit ?? 100;
+    const offset = opts.offset ?? 0;
+
+    const result = await db.query<{
+      id: string;
+      title: string;
+      content: string;
+      type: string;
+      tags: string[];
+      embedding: string;
+    }>(
+      `SELECT id, title, content, type, tags, embedding::text
+       FROM reasoning_chains
+       WHERE embedding IS NOT NULL
+       ORDER BY created_at ASC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      content: r.content,
+      type: r.type as ReasoningType,
+      tags: r.tags ?? [],
+      embedding: parseVectorString(r.embedding),
+    }));
+  }
+}
+
+/**
+ * Parse a pgvector text representation "[0.1,0.2,...]" back into a number array.
+ */
+function parseVectorString(vecStr: string): number[] {
+  // pgvector returns "[0.1,0.2,0.3,...]"
+  const inner = vecStr.replace(/^\[/, "").replace(/\]$/, "");
+  return inner.split(",").map(Number);
 }

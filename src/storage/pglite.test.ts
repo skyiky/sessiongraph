@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { PGliteStorageProvider } from "./pglite.ts";
+import type { ChainRelation } from "../config/types.ts";
 
 /** The fixed local user ID used by PGlite provider for all data */
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -315,5 +316,294 @@ describe("PGliteStorageProvider", () => {
 
     expect(results.length).toBe(1);
     expect(results[0]!.title).toBe("Exploring Ollama vs OpenAI for backfill");
+  });
+
+  // ---- listChainsWithEmbeddings ----
+
+  test("listChainsWithEmbeddings returns chains that have embeddings", async () => {
+    const results = await provider.listChainsWithEmbeddings({
+      userId: LOCAL_USER_ID,
+    });
+
+    // Only chains inserted with embeddings should be returned
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(r.id).toBeTruthy();
+      expect(r.title).toBeTruthy();
+      expect(r.content).toBeTruthy();
+      expect(r.type).toBeTruthy();
+      expect(Array.isArray(r.tags)).toBe(true);
+      expect(Array.isArray(r.embedding)).toBe(true);
+      expect(r.embedding.length).toBeGreaterThan(0);
+      // Verify all embedding values are finite numbers
+      for (const v of r.embedding) {
+        expect(Number.isFinite(v)).toBe(true);
+      }
+    }
+  });
+
+  test("listChainsWithEmbeddings excludes chains without embeddings", async () => {
+    // Insert a chain without an embedding
+    const noEmbedId = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Chain without embedding",
+      content: "This chain has no embedding vector.",
+      tags: ["test"],
+    });
+
+    const results = await provider.listChainsWithEmbeddings({
+      userId: LOCAL_USER_ID,
+      limit: 1000,
+    });
+
+    // The chain without an embedding should not appear
+    const ids = results.map((r) => r.id);
+    expect(ids).not.toContain(noEmbedId);
+  });
+
+  test("listChainsWithEmbeddings supports pagination", async () => {
+    const page1 = await provider.listChainsWithEmbeddings({
+      userId: LOCAL_USER_ID,
+      limit: 1,
+      offset: 0,
+    });
+    const page2 = await provider.listChainsWithEmbeddings({
+      userId: LOCAL_USER_ID,
+      limit: 1,
+      offset: 1,
+    });
+
+    expect(page1.length).toBeLessThanOrEqual(1);
+    // If there are at least 2 chains with embeddings, pages should differ
+    if (page1.length > 0 && page2.length > 0) {
+      expect(page1[0]!.id).not.toBe(page2[0]!.id);
+    }
+  });
+
+  // ---- Chain Relations ----
+
+  // Store chain IDs for relation tests
+  let chainA: string;
+  let chainB: string;
+  let chainC: string;
+
+  test("setup: create chains for relation tests", async () => {
+    chainA = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Chose React for frontend",
+      content: "We chose React over Vue because of ecosystem size and team familiarity.",
+      tags: ["frontend", "framework"],
+    });
+    chainB = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Chose Next.js for SSR",
+      content: "After choosing React, Next.js was the natural choice for server-side rendering.",
+      tags: ["frontend", "framework"],
+    });
+    chainC = await provider.insertReasoningChain({
+      sessionId: "test-session-2",
+      userId: LOCAL_USER_ID,
+      type: "rejection",
+      title: "Rejected Vue for frontend",
+      content: "Vue was rejected because team had no experience with it.",
+      tags: ["frontend", "framework"],
+    });
+
+    expect(chainA).toBeTruthy();
+    expect(chainB).toBeTruthy();
+    expect(chainC).toBeTruthy();
+  });
+
+  test("insertChainRelation creates a relation", async () => {
+    const id = await provider.insertChainRelation({
+      sourceChainId: chainA,
+      targetChainId: chainB,
+      relationType: "leads_to",
+    });
+
+    expect(id).toBeTruthy();
+    expect(typeof id).toBe("string");
+  });
+
+  test("insertChainRelation deduplicates (ON CONFLICT DO NOTHING)", async () => {
+    const id = await provider.insertChainRelation({
+      sourceChainId: chainA,
+      targetChainId: chainB,
+      relationType: "leads_to",
+    });
+
+    // Duplicate returns empty string (no row returned from RETURNING)
+    expect(id).toBe("");
+  });
+
+  test("insertChainRelation allows same pair with different relation type", async () => {
+    const id = await provider.insertChainRelation({
+      sourceChainId: chainA,
+      targetChainId: chainB,
+      relationType: "builds_on",
+    });
+
+    expect(id).toBeTruthy();
+    expect(id).not.toBe("");
+  });
+
+  test("insertChainRelations batch inserts", async () => {
+    const ids = await provider.insertChainRelations([
+      {
+        sourceChainId: chainA,
+        targetChainId: chainC,
+        relationType: "contradicts",
+      },
+      {
+        sourceChainId: chainC,
+        targetChainId: chainA,
+        relationType: "contradicts",
+      },
+    ]);
+
+    expect(ids.length).toBe(2);
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBeTruthy();
+  });
+
+  test("insertChainRelations handles empty array", async () => {
+    const ids = await provider.insertChainRelations([]);
+    expect(ids).toEqual([]);
+  });
+
+  test("insertChainRelations deduplicates within batch", async () => {
+    // Re-insert the same contradicts relations
+    const ids = await provider.insertChainRelations([
+      {
+        sourceChainId: chainA,
+        targetChainId: chainC,
+        relationType: "contradicts",
+      },
+    ]);
+
+    expect(ids.length).toBe(1);
+    expect(ids[0]).toBe(""); // duplicate → empty string
+  });
+
+  test("getRelatedChains returns outgoing relations", async () => {
+    const results = await provider.getRelatedChains({ chainId: chainA });
+
+    // chainA has outgoing: leads_to→B, builds_on→B, contradicts→C
+    const outgoing = results.filter((r) => r.direction === "outgoing");
+    expect(outgoing.length).toBe(3);
+
+    const leadsTo = outgoing.find((r) => r.relationType === "leads_to");
+    expect(leadsTo).toBeDefined();
+    expect(leadsTo!.chainId).toBe(chainB);
+    expect(leadsTo!.title).toBe("Chose Next.js for SSR");
+  });
+
+  test("getRelatedChains returns incoming relations", async () => {
+    const results = await provider.getRelatedChains({ chainId: chainB });
+
+    // chainB has incoming: A→leads_to, A→builds_on
+    const incoming = results.filter((r) => r.direction === "incoming");
+    expect(incoming.length).toBe(2);
+
+    const fromA = incoming.filter((r) => r.chainId === chainA);
+    expect(fromA.length).toBe(2);
+  });
+
+  test("getRelatedChains shows bidirectional contradicts", async () => {
+    // chainA contradicts chainC (both directions stored)
+    const fromA = await provider.getRelatedChains({ chainId: chainA });
+    const fromC = await provider.getRelatedChains({ chainId: chainC });
+
+    const aContradicts = fromA.filter((r) => r.relationType === "contradicts");
+    const cContradicts = fromC.filter((r) => r.relationType === "contradicts");
+
+    // A has outgoing contradicts→C
+    expect(aContradicts.some((r) => r.direction === "outgoing" && r.chainId === chainC)).toBe(true);
+    // A also has incoming contradicts←C
+    expect(aContradicts.some((r) => r.direction === "incoming" && r.chainId === chainC)).toBe(true);
+
+    // C should see both directions too
+    expect(cContradicts.some((r) => r.direction === "outgoing" && r.chainId === chainA)).toBe(true);
+    expect(cContradicts.some((r) => r.direction === "incoming" && r.chainId === chainA)).toBe(true);
+  });
+
+  test("getRelatedChains filters by relation type", async () => {
+    const results = await provider.getRelatedChains({
+      chainId: chainA,
+      relationType: "leads_to",
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.relationType).toBe("leads_to");
+    expect(results[0]!.chainId).toBe(chainB);
+  });
+
+  test("getRelatedChains returns empty for chain with no relations", async () => {
+    // Insert a chain with no relations
+    const lonelyChain = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Isolated insight",
+      content: "This chain has no connections.",
+      tags: [],
+    });
+
+    const results = await provider.getRelatedChains({ chainId: lonelyChain });
+    expect(results.length).toBe(0);
+  });
+
+  test("getRelatedChains respects limit", async () => {
+    const results = await provider.getRelatedChains({
+      chainId: chainA,
+      limit: 2,
+    });
+
+    expect(results.length).toBe(2);
+  });
+
+  test("getRelatedChains includes tags in results", async () => {
+    const results = await provider.getRelatedChains({ chainId: chainA });
+    const leadsTo = results.find((r) => r.relationType === "leads_to" && r.direction === "outgoing");
+
+    expect(leadsTo).toBeDefined();
+    expect(leadsTo!.tags).toContain("frontend");
+    expect(leadsTo!.tags).toContain("framework");
+  });
+
+  test("cascade delete removes relations when chain is deleted", async () => {
+    // Insert a temporary chain and relation
+    const tempChain = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Temporary chain",
+      content: "This will be deleted.",
+      tags: [],
+    });
+
+    await provider.insertChainRelation({
+      sourceChainId: chainA,
+      targetChainId: tempChain,
+      relationType: "refines",
+    });
+
+    // Verify relation exists
+    let related = await provider.getRelatedChains({ chainId: chainA });
+    expect(related.some((r) => r.chainId === tempChain)).toBe(true);
+
+    // Delete the chain directly via DB
+    const db = (provider as any).db;
+    await db.query("DELETE FROM reasoning_chains WHERE id = $1", [tempChain]);
+
+    // Relation should be gone due to CASCADE
+    related = await provider.getRelatedChains({ chainId: chainA });
+    expect(related.some((r) => r.chainId === tempChain)).toBe(false);
   });
 });

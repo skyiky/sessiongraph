@@ -36,6 +36,37 @@ Do not call `sessiongraph_remember` for:
 - **tags**: 2-4 topic tags for searchability (e.g. `database`, `architecture`, `auth`)
 - **project**: Set to the current project name or path
 
+## Linking Related Chains
+
+When you recall past reasoning with `sessiongraph_recall` and the results are directly related to a new chain you're about to capture, use the `related_to` parameter to create graph edges.
+
+The `recall` output includes chain IDs. Use them like this:
+
+```
+sessiongraph_remember({
+  title: "Switched from REST to tRPC for type safety",
+  content: "...",
+  type: "decision",
+  tags: ["api", "architecture"],
+  related_to: [
+    { chain_id: "abc123...", relation: "supersedes" },
+    { chain_id: "def456...", relation: "builds_on" }
+  ]
+})
+```
+
+Available relation types (from the new chain's perspective toward the referenced chain):
+- `leads_to` — this chain caused/motivated the referenced one
+- `supersedes` — this chain replaces/overrides the referenced one
+- `contradicts` — these two conflict (stored bidirectionally)
+- `builds_on` — this chain extends/deepens the referenced one
+- `depends_on` — this chain only makes sense because of the referenced one
+- `refines` — this chain narrows/improves the referenced one without replacing it
+- `generalizes` — this chain abstracts the referenced one into a broader pattern
+- `analogous_to` — similar reasoning in different contexts (stored bidirectionally)
+
+Only link when there's a clear, meaningful connection. Most chains won't need `related_to`.
+
 ## Quality Over Quantity
 
 A good session captures 2-6 chains. If you're capturing 10+, you're being too noisy. If you're capturing 0, you're missing reasoning. Aim for chains that would be genuinely useful to recall 3 months from now.

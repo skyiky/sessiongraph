@@ -1,6 +1,10 @@
 import type {
+  ChainRelation,
+  ChainWithEmbedding,
   ReasoningChain,
   RecallResult,
+  RelatedChainResult,
+  RelationType,
   Session,
   SessionChunk,
   SessionListEntry,
@@ -32,6 +36,18 @@ export interface TimelineOpts {
   limit?: number;
 }
 
+export interface GetRelatedChainsOpts {
+  chainId: string;
+  relationType?: RelationType;
+  limit?: number;
+}
+
+export interface ListChainsWithEmbeddingsOpts {
+  userId: string;
+  limit?: number;
+  offset?: number;
+}
+
 /**
  * StorageProvider abstracts where data lives (PGlite local vs Supabase cloud).
  * Both implementations share the same Postgres SQL dialect thanks to PGlite.
@@ -59,6 +75,15 @@ export interface StorageProvider {
 
   // ---- Session Chunks ----
   insertSessionChunks(chunks: SessionChunk[]): Promise<void>;
+
+  // ---- Chain Relations ----
+  insertChainRelation(relation: ChainRelation): Promise<string>;
+  insertChainRelations(relations: ChainRelation[]): Promise<string[]>;
+  getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]>;
+
+  // ---- Batch / Linking ----
+  /** List chains that have embeddings, paginated. Used by the auto-linker. */
+  listChainsWithEmbeddings(opts: ListChainsWithEmbeddingsOpts): Promise<ChainWithEmbedding[]>;
 }
 
 // ---- Embedding Provider Interface ----

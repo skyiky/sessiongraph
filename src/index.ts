@@ -4,6 +4,7 @@ import { config } from "./config/config.ts";
 import { getStorageProvider, getEmbeddingProvider, resetProviders } from "./storage/provider.ts";
 import { runInit } from "./cli/init.ts";
 import { runBackfill } from "./backfill/backfill.ts";
+import { runLinker } from "./backfill/linker.ts";
 
 const program = new Command();
 
@@ -351,6 +352,73 @@ program
       console.log(`${result.errors.length} error(s):`);
       for (const err of result.errors.slice(0, 5)) console.log(`  - ${err}`);
     }
+  });
+
+// ---- Link (auto-linking pass) ----
+
+program
+  .command("link")
+  .description("Auto-link reasoning chains into a knowledge graph using Ollama")
+  .option("-l, --limit <number>", "Maximum chains to process")
+  .option("-k, --top-k <number>", "Top-K similar chains to compare (default: 5)", "5")
+  .option("-d, --delay <seconds>", "Delay between classification calls in seconds (default: 1)", "1")
+  .option("--threshold <number>", "Minimum similarity threshold for candidates (default: 0.5)", "0.5")
+  .option("--threads <number>", "Limit CPU threads for Ollama inference")
+  .option("--cpu-only", "Run on CPU only (no GPU)")
+  .action(async (opts) => {
+    const delayMs = parsePositiveNumber(opts.delay, "delay") * 1000;
+    const topK = parsePositiveInt(opts.topK, "top-k");
+    const threshold = parsePositiveNumber(opts.threshold, "threshold");
+
+    const ollamaOptions: Record<string, number> = {};
+    if (opts.threads) {
+      ollamaOptions.numThread = parsePositiveInt(opts.threads, "threads");
+    }
+    if (opts.cpuOnly) ollamaOptions.numGpu = 0;
+
+    const limit = opts.limit
+      ? parsePositiveInt(opts.limit, "limit")
+      : undefined;
+
+    console.log("Starting auto-linking pass...");
+    console.log(`  Top-K: ${topK} candidates per chain`);
+    console.log(`  Threshold: ${threshold}`);
+    console.log(`  Delay: ${opts.delay}s between classifications`);
+    if (opts.threads) console.log(`  CPU threads: ${opts.threads}`);
+    if (opts.cpuOnly) console.log(`  Mode: CPU-only (no GPU)`);
+    if (limit) console.log(`  Limit: ${limit} chains`);
+
+    const startTime = Date.now();
+
+    const result = await runLinker({
+      limit,
+      topK,
+      threshold,
+      delayMs,
+      ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
+      onProgress: (progress) => {
+        const pct = Math.round((progress.current / progress.total) * 100);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        const cid = progress.chainId.slice(0, 8);
+        process.stdout.write(
+          `\r\x1b[K[${pct}%] ${progress.current}/${progress.total} | chain:${cid} | ` +
+          `${progress.candidatesFound} candidates, ${progress.relationsCreated} links [${elapsed}s]`
+        );
+        // Print newline after each chain
+        process.stdout.write("\n");
+      },
+    });
+
+    const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\nDone in ${totalElapsed}s!`);
+    console.log(`  Chains processed: ${result.chainsProcessed}`);
+    console.log(`  Relations created: ${result.relationsCreated}`);
+    if (result.errors.length > 0) {
+      console.log(`  ${result.errors.length} error(s):`);
+      for (const err of result.errors.slice(0, 5)) console.log(`    - ${err}`);
+    }
+
+    await resetProviders();
   });
 
 // ---- MCP (starts the MCP server) ----

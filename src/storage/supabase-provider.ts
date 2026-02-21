@@ -5,11 +5,17 @@ import type {
   ListSessionsOpts,
   SearchReasoningOpts,
   TimelineOpts,
+  GetRelatedChainsOpts,
+  ListChainsWithEmbeddingsOpts,
 } from "./provider.ts";
 import type {
+  ChainRelation,
+  ChainWithEmbedding,
   ReasoningChain,
   ReasoningType,
   RecallResult,
+  RelatedChainResult,
+  RelationType,
   Session,
   SessionChunk,
   SessionListEntry,
@@ -276,5 +282,138 @@ export class SupabaseStorageProvider implements StorageProvider {
       }))
     );
     if (error) throw new Error(`Failed to insert session chunks: ${error.message}`);
+  }
+
+  // ---- Chain Relations ----
+
+  async insertChainRelation(relation: ChainRelation): Promise<string> {
+    const sb = this.getClient();
+    const { data, error } = await sb
+      .from("chain_relations")
+      .upsert(
+        {
+          source_chain_id: relation.sourceChainId,
+          target_chain_id: relation.targetChainId,
+          relation_type: relation.relationType,
+        },
+        { onConflict: "source_chain_id,target_chain_id,relation_type" }
+      )
+      .select("id")
+      .single();
+
+    if (error) throw new Error(`Failed to insert chain relation: ${error.message}`);
+    return data.id;
+  }
+
+  async insertChainRelations(relations: ChainRelation[]): Promise<string[]> {
+    if (relations.length === 0) return [];
+    const sb = this.getClient();
+    const { data, error } = await sb
+      .from("chain_relations")
+      .upsert(
+        relations.map((r) => ({
+          source_chain_id: r.sourceChainId,
+          target_chain_id: r.targetChainId,
+          relation_type: r.relationType,
+        })),
+        { onConflict: "source_chain_id,target_chain_id,relation_type" }
+      )
+      .select("id");
+
+    if (error) throw new Error(`Failed to insert chain relations: ${error.message}`);
+    return (data ?? []).map((d: any) => d.id);
+  }
+
+  async getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]> {
+    const sb = this.getClient();
+    const limit = opts.limit ?? 20;
+
+    // Query outgoing relations (this chain → others)
+    let outgoingQuery = sb
+      .from("chain_relations")
+      .select("target_chain_id, relation_type, reasoning_chains!chain_relations_target_chain_id_fkey(id, title, type, content, tags, created_at)")
+      .eq("source_chain_id", opts.chainId)
+      .limit(limit);
+
+    if (opts.relationType) {
+      outgoingQuery = outgoingQuery.eq("relation_type", opts.relationType);
+    }
+
+    // Query incoming relations (others → this chain)
+    let incomingQuery = sb
+      .from("chain_relations")
+      .select("source_chain_id, relation_type, reasoning_chains!chain_relations_source_chain_id_fkey(id, title, type, content, tags, created_at)")
+      .eq("target_chain_id", opts.chainId)
+      .limit(limit);
+
+    if (opts.relationType) {
+      incomingQuery = incomingQuery.eq("relation_type", opts.relationType);
+    }
+
+    const [outgoing, incoming] = await Promise.all([outgoingQuery, incomingQuery]);
+
+    if (outgoing.error) throw new Error(`Failed to get outgoing relations: ${outgoing.error.message}`);
+    if (incoming.error) throw new Error(`Failed to get incoming relations: ${incoming.error.message}`);
+
+    const results: RelatedChainResult[] = [];
+
+    for (const row of outgoing.data ?? []) {
+      const chain = row.reasoning_chains as any;
+      if (!chain) continue;
+      results.push({
+        chainId: chain.id,
+        relationType: row.relation_type as RelationType,
+        direction: "outgoing",
+        title: chain.title,
+        type: chain.type as ReasoningType,
+        content: chain.content,
+        tags: chain.tags ?? [],
+        createdAt: chain.created_at,
+      });
+    }
+
+    for (const row of incoming.data ?? []) {
+      const chain = row.reasoning_chains as any;
+      if (!chain) continue;
+      results.push({
+        chainId: chain.id,
+        relationType: row.relation_type as RelationType,
+        direction: "incoming",
+        title: chain.title,
+        type: chain.type as ReasoningType,
+        content: chain.content,
+        tags: chain.tags ?? [],
+        createdAt: chain.created_at,
+      });
+    }
+
+    return results;
+  }
+
+  // ---- Batch / Linking ----
+
+  async listChainsWithEmbeddings(opts: ListChainsWithEmbeddingsOpts): Promise<ChainWithEmbedding[]> {
+    const sb = this.getClient();
+    const limit = opts.limit ?? 100;
+    const offset = opts.offset ?? 0;
+
+    const { data, error } = await sb
+      .from("reasoning_chains")
+      .select("id, title, content, type, tags, embedding")
+      .eq("user_id", opts.userId)
+      .not("embedding", "is", null)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + limit - 1);
+
+    if (error) throw new Error(`Failed to list chains with embeddings: ${error.message}`);
+
+    return (data ?? []).map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      content: r.content,
+      type: r.type as ReasoningType,
+      tags: r.tags ?? [],
+      embedding: r.embedding,
+    }));
   }
 }
