@@ -33,7 +33,7 @@ export async function loadAuth(): Promise<AuthState | null> {
  */
 export function saveAuth(state: AuthState): void {
   ensureDataDir();
-  writeFileSync(config.paths.auth, JSON.stringify(state, null, 2), "utf-8");
+  writeFileSync(config.paths.auth, JSON.stringify(state, null, 2), { encoding: "utf-8", mode: 0o600 });
 }
 
 /**

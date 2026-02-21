@@ -431,15 +431,16 @@ describe("PGliteStorageProvider", () => {
     expect(typeof id).toBe("string");
   });
 
-  test("insertChainRelation deduplicates (ON CONFLICT DO NOTHING)", async () => {
+  test("insertChainRelation deduplicates (ON CONFLICT DO UPDATE)", async () => {
     const id = await provider.insertChainRelation({
       sourceChainId: chainA,
       targetChainId: chainB,
       relationType: "leads_to",
     });
 
-    // Duplicate returns empty string (no row returned from RETURNING)
-    expect(id).toBe("");
+    // Duplicate returns existing row's ID (DO UPDATE + RETURNING)
+    expect(id).toBeTruthy();
+    expect(typeof id).toBe("string");
   });
 
   test("insertChainRelation allows same pair with different relation type", async () => {

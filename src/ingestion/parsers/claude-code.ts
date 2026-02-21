@@ -62,29 +62,12 @@ export function isClaudeCodeAvailable(): boolean {
 }
 
 export function getNewSessions(sinceTimestamp?: number): ClaudeCodeSession[] {
-  const historyPath = config.claudeCode.historyPath;
-  if (!existsSync(historyPath)) return [];
-
-  const lines = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean);
+  const index = getHistoryIndex();
   const sessions: ClaudeCodeSession[] = [];
 
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line) as HistoryEntry;
-      const ts = new Date(entry.timestamp).getTime();
-
-      if (sinceTimestamp && ts <= sinceTimestamp) continue;
-
-      sessions.push({
-        id: entry.sessionId,
-        project: entry.project,
-        title: entry.display,
-        startedAt: ts,
-        updatedAt: ts,
-      });
-    } catch {
-      console.error("Skipping malformed history line:", line.slice(0, 100));
-    }
+  for (const session of index.values()) {
+    if (sinceTimestamp && session.startedAt <= sinceTimestamp) continue;
+    sessions.push(session);
   }
 
   return sessions;
@@ -198,6 +181,55 @@ export function parseNewSessions(sinceTimestamp?: number): ParsedClaudeCodeSessi
   return parsed;
 }
 
+// --- Cached history index ---
+
+/** Cached map of sessionId → ClaudeCodeSession from history.jsonl. Lazily built once. */
+let historyCache: Map<string, ClaudeCodeSession> | null = null;
+let historyCachePath: string | null = null;
+
+function getHistoryIndex(): Map<string, ClaudeCodeSession> {
+  const historyPath = config.claudeCode.historyPath;
+
+  // Invalidate cache if the path changed (shouldn't happen, but defensive)
+  if (historyCache && historyCachePath === historyPath) {
+    return historyCache;
+  }
+
+  const map = new Map<string, ClaudeCodeSession>();
+  if (!existsSync(historyPath)) {
+    historyCache = map;
+    historyCachePath = historyPath;
+    return map;
+  }
+
+  const lines = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line) as HistoryEntry;
+      const ts = new Date(entry.timestamp).getTime();
+      map.set(entry.sessionId, {
+        id: entry.sessionId,
+        project: entry.project,
+        title: entry.display,
+        startedAt: ts,
+        updatedAt: ts,
+      });
+    } catch {
+      // skip malformed
+    }
+  }
+
+  historyCache = map;
+  historyCachePath = historyPath;
+  return map;
+}
+
+/** Clear the cached history index (useful for testing or after new sessions arrive). */
+export function clearHistoryCache(): void {
+  historyCache = null;
+  historyCachePath = null;
+}
+
 // --- Internal helpers ---
 
 function extractTextContent(blocks: ContentBlock[]): string {
@@ -244,30 +276,8 @@ function findSessionFile(sessionId: string): string | null {
 }
 
 function findSessionInfo(sessionId: string): ClaudeCodeSession | null {
-  const historyPath = config.claudeCode.historyPath;
-  if (!existsSync(historyPath)) return null;
-
-  const lines = readFileSync(historyPath, "utf-8").split("\n").filter(Boolean);
-
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line) as HistoryEntry;
-      if (entry.sessionId === sessionId) {
-        const ts = new Date(entry.timestamp).getTime();
-        return {
-          id: entry.sessionId,
-          project: entry.project,
-          title: entry.display,
-          startedAt: ts,
-          updatedAt: ts,
-        };
-      }
-    } catch {
-      // skip malformed
-    }
-  }
-
-  return null;
+  const index = getHistoryIndex();
+  return index.get(sessionId) ?? null;
 }
 
 function buildConversationText(messages: ClaudeCodeMessage[]): string {

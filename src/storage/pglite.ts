@@ -516,13 +516,12 @@ export class PGliteStorageProvider implements StorageProvider {
     const result = await db.query<{ id: string }>(
       `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
        VALUES ($1, $2, $3)
-       ON CONFLICT (source_chain_id, target_chain_id, relation_type) DO NOTHING
+       ON CONFLICT (source_chain_id, target_chain_id, relation_type)
+       DO UPDATE SET relation_type = EXCLUDED.relation_type
        RETURNING id`,
       [relation.sourceChainId, relation.targetChainId, relation.relationType]
     );
 
-    // ON CONFLICT DO NOTHING returns no rows if duplicate — return empty string
-    if (result.rows.length === 0) return "";
     return result.rows[0]!.id;
   }
 
@@ -658,9 +657,16 @@ export class PGliteStorageProvider implements StorageProvider {
 
 /**
  * Parse a pgvector text representation "[0.1,0.2,...]" back into a number array.
+ * Validates that all elements are finite numbers.
  */
 function parseVectorString(vecStr: string): number[] {
   // pgvector returns "[0.1,0.2,0.3,...]"
   const inner = vecStr.replace(/^\[/, "").replace(/\]$/, "");
-  return inner.split(",").map(Number);
+  const values = inner.split(",").map(Number);
+  for (let i = 0; i < values.length; i++) {
+    if (!Number.isFinite(values[i])) {
+      throw new Error(`Invalid vector element at index ${i}: '${inner.split(",")[i]}' is not a finite number`);
+    }
+  }
+  return values;
 }

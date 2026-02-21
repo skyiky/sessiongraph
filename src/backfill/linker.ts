@@ -203,23 +203,8 @@ What is the relationship from Chain A to Chain B?`;
   }
 }
 
-// --- Cosine similarity (for local re-ranking without DB round-trip) ---
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    const ai = a[i]!;
-    const bi = b[i]!;
-    dot += ai * bi;
-    normA += ai * ai;
-    normB += bi * bi;
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denom === 0) return 0;
-  return dot / denom;
-}
+/** Number of chains between state saves (avoids excessive I/O) */
+const STATE_SAVE_INTERVAL = 10;
 
 // --- Main linker ---
 
@@ -297,6 +282,13 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
     // Filter out self-match
     const filtered = candidates.filter((c) => c.id !== chain.id);
 
+    // Pre-load existing relations for this chain to avoid O(candidates) DB queries
+    const existingRelations = await storage.getRelatedChains({
+      chainId: chain.id,
+      limit: 200,
+    });
+    const alreadyLinkedIds = new Set(existingRelations.map((r) => r.chainId));
+
     let relationsForChain = 0;
 
     for (const candidate of filtered) {
@@ -305,13 +297,8 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
       if (processedPairs.has(pairKey)) continue;
       processedPairs.add(pairKey);
 
-      // Check if any relation already exists between these two
-      const existingRelations = await storage.getRelatedChains({
-        chainId: chain.id,
-        limit: 50,
-      });
-      const alreadyLinked = existingRelations.some((r) => r.chainId === candidate.id);
-      if (alreadyLinked) continue;
+      // Check if any relation already exists between these two (local Set lookup)
+      if (alreadyLinkedIds.has(candidate.id)) continue;
 
       // Get the full candidate chain data for classification
       const candidateChain = chainMap.get(candidate.id);
@@ -358,8 +345,12 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
     // Mark chain as processed
     state.linkedChainIds.push(chain.id);
     linkedSet.add(chain.id);
-    saveState(state);
     result.chainsProcessed++;
+
+    // Save state periodically (every STATE_SAVE_INTERVAL chains) to reduce I/O
+    if (result.chainsProcessed % STATE_SAVE_INTERVAL === 0) {
+      saveState(state);
+    }
 
     // Report progress
     opts.onProgress?.({
@@ -369,6 +360,11 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
       candidatesFound: filtered.length,
       relationsCreated: relationsForChain,
     });
+  }
+
+  // Final state flush to capture any remaining unwritten progress
+  if (result.chainsProcessed > 0) {
+    saveState(state);
   }
 
   return result;

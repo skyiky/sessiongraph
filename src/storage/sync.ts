@@ -27,7 +27,7 @@ export async function syncToSupabase(): Promise<{ synced: number; failed: number
   }
 
   // Sync in FK order: sessions first, then dependent tables
-  const tableOrder = ["sessions", "reasoning_chains", "session_chunks"];
+  const tableOrder = ["sessions", "reasoning_chains", "session_chunks", "chain_relations"];
   const sortedTables = [...grouped.keys()].sort((a, b) => {
     const ai = tableOrder.indexOf(a);
     const bi = tableOrder.indexOf(b);

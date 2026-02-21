@@ -119,7 +119,7 @@ export function markFailed(id: number, error: string): void {
 export function getPendingCount(): number {
   const db = getBufferDb();
   const row = db
-    .prepare("SELECT COUNT(*) as count FROM buffer_queue WHERE synced_at IS NULL")
+    .prepare("SELECT COUNT(*) as count FROM buffer_queue WHERE synced_at IS NULL AND retries < 10")
     .get() as any;
   return row?.count ?? 0;
 }

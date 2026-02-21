@@ -6,6 +6,8 @@ import { runInit } from "./cli/init.ts";
 import { runBackfill, requestBackfillStop } from "./backfill/backfill.ts";
 import { runLinker } from "./backfill/linker.ts";
 
+import { createInterface } from "node:readline";
+
 const program = new Command();
 
 /**
@@ -30,6 +32,24 @@ function parsePositiveNumber(value: string, flagName: string): number {
     throw new Error(`--${flagName} must be a non-negative number, got '${value}'`);
   }
   return n;
+}
+
+/**
+ * Prompt the user for a password on stdin (not hidden — Bun limitation).
+ * Falls back to a simple readline prompt.
+ */
+function promptPassword(prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      if (!answer) {
+        reject(new Error("Password is required."));
+      } else {
+        resolve(answer);
+      }
+    });
+  });
 }
 
 program
@@ -66,9 +86,11 @@ async function resolveUserId(): Promise<string> {
     throw new Error("Not authenticated. Run 'sessiongraph login' first.");
   }
 
-  // Set auth on the Supabase provider if needed
-  const { setSupabaseAuth } = await import("./storage/supabase-provider.ts");
-  await setSupabaseAuth(auth.accessToken, auth.refreshToken);
+  // Set auth on the actual storage provider instance for RLS
+  const storage = await getStorageProvider();
+  if (storage.mode === "cloud" && "setAuth" in storage) {
+    await (storage as any).setAuth(auth.accessToken, auth.refreshToken);
+  }
 
   return auth.userId;
 }
@@ -79,15 +101,17 @@ program
   .command("login")
   .description("Log in to SessionGraph (cloud mode only)")
   .requiredOption("-e, --email <email>", "Email address")
-  .requiredOption("-p, --password <password>", "Password")
+  .option("-p, --password <password>", "Password (omit to enter interactively)")
   .action(async (opts) => {
     requireCloudMode("login");
     try {
+      const password = opts.password ?? await promptPassword("Password: ");
       const { login } = await import("./auth/auth.ts");
-      const auth = await login(opts.email, opts.password);
+      const auth = await login(opts.email, password);
       console.log(`Logged in as ${auth.email} (${auth.userId})`);
-    } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Error: ${message}`);
       process.exit(1);
     }
   });
@@ -96,15 +120,17 @@ program
   .command("signup")
   .description("Create a new SessionGraph account (cloud mode only)")
   .requiredOption("-e, --email <email>", "Email address")
-  .requiredOption("-p, --password <password>", "Password (min 6 characters)")
+  .option("-p, --password <password>", "Password (min 6 characters, omit to enter interactively)")
   .action(async (opts) => {
     requireCloudMode("signup");
     try {
+      const password = opts.password ?? await promptPassword("Password (min 6 characters): ");
       const { signup } = await import("./auth/auth.ts");
-      const auth = await signup(opts.email, opts.password);
+      const auth = await signup(opts.email, password);
       console.log(`Account created! Logged in as ${auth.email} (${auth.userId})`);
-    } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Error: ${message}`);
       process.exit(1);
     }
   });
@@ -114,9 +140,15 @@ program
   .description("Log out of SessionGraph (cloud mode only)")
   .action(async () => {
     requireCloudMode("logout");
-    const { logout } = await import("./auth/auth.ts");
-    await logout();
-    console.log("Logged out.");
+    try {
+      const { logout } = await import("./auth/auth.ts");
+      await logout();
+      console.log("Logged out.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Error: ${message}`);
+      process.exit(1);
+    }
   });
 
 // ---- Status ----
@@ -141,8 +173,9 @@ program
         console.log(`Sessions:      ${sessions.length}`);
         console.log(`Chains:        ${totalChains}`);
         await resetProviders();
-      } catch (err: any) {
-        console.log(`Database:      Error: ${err.message}`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`Database:      Error: ${message}`);
       }
 
       // Ollama status
