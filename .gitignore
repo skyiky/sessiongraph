@@ -36,5 +36,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Local utility scripts (not part of the project)
 scripts/
 
+# Internal strategy docs
+docs/GTM.md
+
 # SessionGraph local data
 .sessiongraph/
