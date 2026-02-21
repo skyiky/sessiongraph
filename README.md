@@ -1,10 +1,10 @@
 # SessionGraph
 
-> Never lose the reasoning behind an AI-assisted decision again.
+> Searchable reasoning history for AI coding sessions.
 
-Your AI coding sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision and have no idea why you (and Claude) chose this approach over the three alternatives you explored and rejected.
+Your AI coding sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision with no idea why you chose this approach — or what alternatives you explored and rejected.
 
-SessionGraph captures reasoning chains from your AI coding sessions and makes them semantically searchable — so you never lose the "why" behind any decision.
+SessionGraph captures reasoning chains from your AI coding sessions and makes them semantically searchable.
 
 ## How Is This Different From CLAUDE.md?
 
