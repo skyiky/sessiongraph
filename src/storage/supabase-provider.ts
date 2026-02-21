@@ -21,6 +21,30 @@ import type {
  * Requires Supabase account and auth.
  * Used for cloud sync and team features.
  */
+/**
+ * Create and return a bare Supabase client using config credentials.
+ * Used by sync.ts and other modules that need direct Supabase access
+ * outside the storage provider abstraction.
+ */
+export function getSupabaseClient(): SupabaseClient {
+  if (!config.supabase.url || !config.supabase.anonKey) {
+    throw new Error(
+      "Supabase URL and anon key must be set. " +
+      "Set SESSIONGRAPH_SUPABASE_URL and SESSIONGRAPH_SUPABASE_ANON_KEY environment variables."
+    );
+  }
+  return createClient(config.supabase.url, config.supabase.anonKey);
+}
+
+/**
+ * Set auth session on a standalone Supabase client.
+ * Used by CLI commands in cloud mode to authenticate before data operations.
+ */
+export async function setSupabaseAuth(accessToken: string, refreshToken: string): Promise<void> {
+  const sb = getSupabaseClient();
+  await sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+}
+
 export class SupabaseStorageProvider implements StorageProvider {
   readonly mode = "cloud" as const;
   private client: SupabaseClient | null = null;

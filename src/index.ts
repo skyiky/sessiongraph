@@ -70,7 +70,7 @@ async function resolveUserId(): Promise<string> {
   }
 
   // Set auth on the Supabase provider if needed
-  const { setSupabaseAuth } = await import("./storage/supabase.ts");
+  const { setSupabaseAuth } = await import("./storage/supabase-provider.ts");
   await setSupabaseAuth(auth.accessToken, auth.refreshToken);
 
   return auth.userId;

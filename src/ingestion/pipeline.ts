@@ -1,7 +1,12 @@
 import { parseNewSessions, type ParsedSession } from "./parsers/opencode.ts";
 import { extractWithOllama } from "../backfill/ollama-extractor.ts";
 import { enqueue, enqueueBatch, getSyncState, setSyncState } from "../storage/buffer.ts";
-import { generateEmbedding, generateEmbeddings } from "../storage/supabase.ts";
+import { SupabaseEmbeddingProvider } from "../embeddings/supabase.ts";
+
+// Legacy pipeline uses Supabase Edge Function embeddings directly
+const _supabaseEmbeddings = new SupabaseEmbeddingProvider();
+const generateEmbedding = (text: string) => _supabaseEmbeddings.generateEmbedding(text);
+const generateEmbeddings = (texts: string[]) => _supabaseEmbeddings.generateEmbeddings(texts);
 import type { ReasoningChain, Session, SessionChunk } from "../config/types.ts";
 
 const SYNC_STATE_KEY = "opencode_last_sync";

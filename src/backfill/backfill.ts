@@ -74,8 +74,13 @@ export interface BackfillResult {
 
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
 
+/** Max times a session will be retried before being permanently skipped. */
+const MAX_RETRIES = 3;
+
 interface BackfillState {
   backfilledSessionIds: string[];
+  /** Maps session IDs to their error retry count. Sessions exceeding MAX_RETRIES are skipped. */
+  erroredSessions?: Record<string, { count: number; lastError: string }>;
 }
 
 function getStatePath(): string {
@@ -85,7 +90,7 @@ function getStatePath(): string {
 function loadState(): BackfillState {
   const statePath = getStatePath();
   if (!existsSync(statePath)) {
-    return { backfilledSessionIds: [] };
+    return { backfilledSessionIds: [], erroredSessions: {} };
   }
   try {
     const raw = readFileSync(statePath, "utf-8");
@@ -94,9 +99,10 @@ function loadState(): BackfillState {
       backfilledSessionIds: Array.isArray(parsed.backfilledSessionIds)
         ? parsed.backfilledSessionIds
         : [],
+      erroredSessions: parsed.erroredSessions ?? {},
     };
   } catch {
-    return { backfilledSessionIds: [] };
+    return { backfilledSessionIds: [], erroredSessions: {} };
   }
 }
 
@@ -112,6 +118,33 @@ function saveState(state: BackfillState): void {
 function markSessionBackfilled(state: BackfillState, sessionId: string): void {
   state.backfilledSessionIds.push(sessionId);
   saveState(state);
+}
+
+/**
+ * Record that a session errored during backfill.
+ * Returns true if the session has exceeded its retry budget.
+ */
+function markSessionErrored(state: BackfillState, sessionId: string, error: string): boolean {
+  if (!state.erroredSessions) state.erroredSessions = {};
+  const entry = state.erroredSessions[sessionId];
+  const newCount = (entry?.count ?? 0) + 1;
+  state.erroredSessions[sessionId] = { count: newCount, lastError: error };
+
+  if (newCount >= MAX_RETRIES) {
+    // Permanently skip — add to backfilled set so it's never retried
+    state.backfilledSessionIds.push(sessionId);
+  }
+
+  saveState(state);
+  return newCount >= MAX_RETRIES;
+}
+
+/**
+ * Check if a session has been errored but still has retries remaining.
+ * Returns the retry count, or 0 if never errored.
+ */
+function getErrorCount(state: BackfillState, sessionId: string): number {
+  return state.erroredSessions?.[sessionId]?.count ?? 0;
 }
 
 // --- Unified session entry ---
@@ -344,7 +377,12 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
     } catch (err) {
       const message =
         err instanceof Error ? err.message : String(err);
-      result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}`);
+      const exhausted = markSessionErrored(state, entry.id, message);
+      const retryCount = getErrorCount(state, entry.id);
+      const retryInfo = exhausted
+        ? ` (retry budget exhausted after ${retryCount} attempts — permanently skipped)`
+        : ` (attempt ${retryCount}/${MAX_RETRIES} — will retry on next run)`;
+      result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}${retryInfo}`);
       emitStep(i, entry, "error", message.slice(0, 100));
     }
 

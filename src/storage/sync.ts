@@ -4,7 +4,7 @@ import {
   markFailed,
   getPendingCount,
 } from "./buffer.ts";
-import { getSupabaseClient } from "./supabase.ts";
+import { getSupabaseClient } from "./supabase-provider.ts";
 import { config } from "../config/config.ts";
 
 /**
