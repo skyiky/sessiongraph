@@ -239,9 +239,25 @@ function collectSessions(opts?: BackfillOptions): SessionEntry[] {
 
 // --- Main backfill function ---
 
+/** Intermediate result from phase 1 extraction */
+interface ExtractedSession {
+  index: number;
+  entry: SessionEntry;
+  sessionData: Session;
+  chains: import("./ollama-extractor.ts").ExtractedChain[];
+}
+
+/** Max chains to embed in a single Ollama call */
+const EMBED_BATCH_SIZE = 50;
+
 /**
- * Run the backfill pipeline: process existing AI coding sessions,
- * extract reasoning chains via Ollama, generate embeddings, and store.
+ * Run the backfill pipeline in three phases to minimize Ollama model swaps:
+ *
+ * Phase 1 (Extract): Parse all sessions + extract chains via chat model.
+ *   → Ollama loads the chat model once for all sessions.
+ * Phase 2 (Embed): Generate embeddings for all extracted chains.
+ *   → Ollama loads the embedding model once for all chains.
+ * Phase 3 (Save): Write sessions + chains to storage, mark as backfilled.
  *
  * Supports resume — tracks which sessions have already been processed
  * in a state file so interrupted runs can be continued.
@@ -287,6 +303,11 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
     });
   };
 
+  // ================================================================
+  // Phase 1: Parse + Extract (chat model loaded once)
+  // ================================================================
+  const extracted: ExtractedSession[] = [];
+
   for (let i = 0; i < sessions.length; i++) {
     const entry = sessions[i]!;
 
@@ -310,12 +331,11 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
         continue;
       }
 
-      // Extract reasoning chains via Ollama
+      // Extract reasoning chains via Ollama (chat model)
       const charLen = parsed.conversationText.length;
       emitStep(i, entry, "extracting", `${parsed.turnCount} turns, ${(charLen / 1000).toFixed(0)}k chars`);
       const chains = await extractWithOllama(parsed.conversationText, ollamaOpts);
 
-      // Mark as backfilled even if no chains found
       if (chains.length === 0) {
         result.sessionsSkipped++;
         markSessionBackfilled(state, entry.id);
@@ -330,53 +350,25 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
         continue;
       }
 
-      // Generate embeddings for all chains
-      emitStep(i, entry, "embedding", `${chains.length} chains`);
-      const texts = chains.map((c) => `${c.title}\n${c.content}`);
-      const chainEmbeddings = await embeddings.generateEmbeddings(texts);
-
-      // Upsert the session and insert chains
-      emitStep(i, entry, "saving", `${chains.length} chains`);
-      const sessionData: Session = {
-        userId: LOCAL_USER_ID,
-        tool: entry.tool,
-        project: parsed.project,
-        startedAt: parsed.startedAt,
-        endedAt: parsed.endedAt,
-        summary: parsed.summary,
-        metadata: parsed.metadata,
-      };
-      const sessionId = await storage.upsertSession(sessionData);
-
-      // Insert reasoning chains
-      const chainRecords: ReasoningChain[] = chains.map((chain, idx) => ({
-        sessionId,
-        userId: LOCAL_USER_ID,
-        type: chain.type,
-        title: chain.title,
-        content: chain.content,
-        tags: chain.tags,
-        embedding: chainEmbeddings[idx] && chainEmbeddings[idx]!.length > 0
-          ? chainEmbeddings[idx]
-          : undefined,
-      }));
-      await storage.insertReasoningChains(chainRecords);
-
-      result.sessionsProcessed++;
-      result.chainsExtracted += chains.length;
-      markSessionBackfilled(state, entry.id);
-
-      emitStep(i, entry, "done", `+${chains.length} chains`);
-      opts?.onProgress?.({
-        current: i + 1,
-        total,
-        sessionId: entry.id,
-        tool: entry.tool,
-        chainsExtracted: chains.length,
+      // Stash for phase 2+3
+      extracted.push({
+        index: i,
+        entry,
+        sessionData: {
+          userId: LOCAL_USER_ID,
+          tool: entry.tool,
+          project: parsed.project,
+          startedAt: parsed.startedAt,
+          endedAt: parsed.endedAt,
+          summary: parsed.summary,
+          metadata: parsed.metadata,
+        },
+        chains,
       });
+
+      emitStep(i, entry, "done", `extracted ${chains.length} chains`);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       const exhausted = markSessionErrored(state, entry.id, message);
       const retryCount = getErrorCount(state, entry.id);
       const retryInfo = exhausted
@@ -386,9 +378,90 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       emitStep(i, entry, "error", message.slice(0, 100));
     }
 
-    // Throttle: pause between sessions to keep system responsive
+    // Throttle between extraction calls to keep system responsive
     if (delayMs > 0 && i < sessions.length - 1) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  if (extracted.length === 0) {
+    return result;
+  }
+
+  // ================================================================
+  // Phase 2: Embed all chains (embedding model loaded once)
+  // ================================================================
+  // Flatten all chain texts across all sessions, tracking flat offset per session
+  const allTexts: string[] = [];
+  const sessionFlatOffset: number[] = []; // sessionFlatOffset[si] = starting index in allTexts
+
+  for (let si = 0; si < extracted.length; si++) {
+    sessionFlatOffset.push(allTexts.length);
+    const ex = extracted[si]!;
+    for (let ci = 0; ci < ex.chains.length; ci++) {
+      const chain = ex.chains[ci]!;
+      allTexts.push(`${chain.title}\n${chain.content}`);
+    }
+  }
+
+  // Emit a progress step for the embedding phase
+  const firstEx = extracted[0]!;
+  emitStep(firstEx.index, firstEx.entry, "embedding", `${allTexts.length} chains across ${extracted.length} sessions`);
+
+  // Batch embed to avoid overloading Ollama
+  const allEmbeddings: number[][] = [];
+  for (let i = 0; i < allTexts.length; i += EMBED_BATCH_SIZE) {
+    const batch = allTexts.slice(i, i + EMBED_BATCH_SIZE);
+    const batchEmbeddings = await embeddings.generateEmbeddings(batch);
+    allEmbeddings.push(...batchEmbeddings);
+  }
+
+  // ================================================================
+  // Phase 3: Save all sessions + chains to storage
+  // ================================================================
+  for (let si = 0; si < extracted.length; si++) {
+    const ex = extracted[si]!;
+    try {
+      emitStep(ex.index, ex.entry, "saving", `${ex.chains.length} chains`);
+
+      const sessionId = await storage.upsertSession(ex.sessionData);
+      const offset = sessionFlatOffset[si]!;
+
+      // Build chain records with embeddings
+      const chainRecords: ReasoningChain[] = ex.chains.map((chain, ci) => {
+        const embedding = allEmbeddings[offset + ci]?.length
+          ? allEmbeddings[offset + ci]
+          : undefined;
+
+        return {
+          sessionId,
+          userId: LOCAL_USER_ID,
+          type: chain.type,
+          title: chain.title,
+          content: chain.content,
+          tags: chain.tags,
+          embedding,
+        };
+      });
+
+      await storage.insertReasoningChains(chainRecords);
+
+      result.sessionsProcessed++;
+      result.chainsExtracted += ex.chains.length;
+      markSessionBackfilled(state, ex.entry.id);
+
+      emitStep(ex.index, ex.entry, "done", `+${ex.chains.length} chains`);
+      opts?.onProgress?.({
+        current: ex.index + 1,
+        total,
+        sessionId: ex.entry.id,
+        tool: ex.entry.tool,
+        chainsExtracted: ex.chains.length,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result.errors.push(`Session ${ex.entry.id} (${ex.entry.tool}) save failed: ${message}`);
+      emitStep(ex.index, ex.entry, "error", message.slice(0, 100));
     }
   }
 
