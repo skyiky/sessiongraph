@@ -90,7 +90,7 @@ export function createConfig() {
     ollama: {
       baseUrl: process.env.SESSIONGRAPH_OLLAMA_URL ?? "http://localhost:11434",
       embeddingModel: process.env.SESSIONGRAPH_OLLAMA_EMBEDDING_MODEL ?? "qwen3-embedding:0.6b",
-      chatModel: process.env.SESSIONGRAPH_OLLAMA_CHAT_MODEL ?? "qwen3:4b",
+      chatModel: process.env.SESSIONGRAPH_OLLAMA_CHAT_MODEL ?? "qwen2.5:3b",
     },
   } as const;
 }
