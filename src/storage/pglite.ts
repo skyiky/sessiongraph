@@ -22,6 +22,25 @@ import type {
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
 
 /**
+ * Validate and serialize an embedding array to a pgvector literal string.
+ * Throws if any element is not a finite number — prevents SQL injection
+ * from corrupted or malicious embedding data.
+ */
+function toVectorLiteral(embedding: number[]): string {
+  if (embedding.length === 0) {
+    throw new Error("Embedding array must not be empty");
+  }
+  for (let i = 0; i < embedding.length; i++) {
+    if (!Number.isFinite(embedding[i])) {
+      throw new Error(
+        `Invalid embedding value at index ${i}: ${embedding[i]} (expected finite number)`
+      );
+    }
+  }
+  return `[${embedding.join(",")}]`;
+}
+
+/**
  * PGlite storage provider — embedded Postgres with pgvector.
  * All data lives in ~/.sessiongraph/pglite/
  * No auth, no network, no account needed.
@@ -219,7 +238,7 @@ export class PGliteStorageProvider implements StorageProvider {
     const db = await this.getDb();
 
     const embeddingStr = chain.embedding
-      ? `[${chain.embedding.join(",")}]`
+      ? toVectorLiteral(chain.embedding)
       : null;
 
     const result = await db.query<{ id: string }>(
@@ -257,7 +276,7 @@ export class PGliteStorageProvider implements StorageProvider {
     const threshold = opts.matchThreshold ?? 0.3;
     const limit = opts.limit ?? 10;
 
-    const embeddingStr = `[${opts.queryEmbedding.join(",")}]`;
+    const embeddingStr = toVectorLiteral(opts.queryEmbedding);
 
     // Build optional project filter
     let projectFilter = "";

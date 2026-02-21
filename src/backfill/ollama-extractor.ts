@@ -39,6 +39,9 @@ IMPORTANT: Return ONLY valid JSON. No markdown code fences, no explanation, just
 /** Max chars to send to Ollama (~5k tokens at ~4 chars/token) */
 const MAX_CONVERSATION_LENGTH = 20_000;
 
+/** Timeout for chat/extraction requests (120 seconds — LLM inference is slow) */
+const CHAT_TIMEOUT_MS = 120_000;
+
 const VALID_TYPES = new Set<string>(["decision", "exploration", "rejection", "solution", "insight"]);
 
 /**
@@ -92,8 +95,15 @@ export async function extractWithOllama(
           num_ctx: opts?.numCtx ?? 4096,
         },
       }),
+      signal: AbortSignal.timeout(CHAT_TIMEOUT_MS),
     });
   } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error(
+        `Ollama chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s. ` +
+        `The model may be too slow or the server unresponsive.`,
+      );
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
       `Ollama is not running. Start it with 'ollama serve' or install from https://ollama.com (${message})`,

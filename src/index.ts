@@ -7,6 +7,32 @@ import { runBackfill } from "./backfill/backfill.ts";
 
 const program = new Command();
 
+/**
+ * Parse a string as a positive integer, or exit with an error.
+ * Used as a Commander argParser for --limit, --threads, etc.
+ */
+function parsePositiveInt(value: string, flagName: string): number {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`Error: --${flagName} must be a positive integer, got '${value}'`);
+    process.exit(1);
+  }
+  return n;
+}
+
+/**
+ * Parse a string as a positive number (float allowed), or exit with an error.
+ * Used for --delay which accepts fractional seconds.
+ */
+function parsePositiveNumber(value: string, flagName: string): number {
+  const n = parseFloat(value);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`Error: --${flagName} must be a non-negative number, got '${value}'`);
+    process.exit(1);
+  }
+  return n;
+}
+
 program
   .name("sessiongraph")
   .description("Never lose the reasoning behind an AI-assisted decision again.")
@@ -169,12 +195,13 @@ program
     const storage = await getStorageProvider();
     const embeddings = await getEmbeddingProvider();
 
+    const limit = parsePositiveInt(opts.limit, "limit");
     const queryEmbedding = await embeddings.generateEmbedding(query);
     const results = await storage.searchReasoning({
       queryEmbedding,
       userId,
       project: opts.project,
-      limit: parseInt(opts.limit, 10),
+      limit,
     });
 
     if (results.length === 0) {
@@ -208,11 +235,12 @@ program
     const userId = await resolveUserId();
     const storage = await getStorageProvider();
 
+    const limit = parsePositiveInt(opts.limit, "limit");
     const sessions = await storage.listSessions({
       userId,
       project: opts.project,
       tool: opts.tool,
-      limit: parseInt(opts.limit, 10),
+      limit,
     });
 
     if (sessions.length === 0) {
@@ -250,21 +278,37 @@ program
   .option("--threads <number>", "Limit CPU threads for Ollama inference")
   .option("--cpu-only", "Run on CPU only (no GPU)")
   .action(async (opts) => {
-    const delayMs = parseFloat(opts.delay) * 1000;
+    // Validate --tool
+    const validTools = ["opencode", "claude-code"] as const;
+    if (opts.tool && !validTools.includes(opts.tool)) {
+      console.error(
+        `Error: --tool must be one of: ${validTools.join(", ")}. Got '${opts.tool}'`
+      );
+      process.exit(1);
+    }
+
+    // Validate numeric args
+    const delayMs = parsePositiveNumber(opts.delay, "delay") * 1000;
     const ollamaOptions: Record<string, number> = {};
-    if (opts.threads) ollamaOptions.numThread = parseInt(opts.threads, 10);
+    if (opts.threads) {
+      ollamaOptions.numThread = parsePositiveInt(opts.threads, "threads");
+    }
     if (opts.cpuOnly) ollamaOptions.numGpu = 0;
+
+    const limit = opts.limit
+      ? parsePositiveInt(opts.limit, "limit")
+      : undefined;
 
     console.log("Starting backfill...");
     console.log(`  Delay: ${opts.delay}s between sessions`);
     if (opts.threads) console.log(`  CPU threads: ${opts.threads}`);
     if (opts.cpuOnly) console.log(`  Mode: CPU-only (no GPU)`);
-    if (opts.limit) console.log(`  Limit: ${opts.limit} sessions`);
+    if (opts.limit) console.log(`  Limit: ${limit} sessions`);
     if (opts.tool) console.log(`  Tool: ${opts.tool}`);
 
     const result = await runBackfill({
       tool: opts.tool,
-      limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+      limit,
       delayMs,
       ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
       onProgress: (progress) => {

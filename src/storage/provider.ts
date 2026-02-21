@@ -85,56 +85,88 @@ import { config } from "../config/config.ts";
 let storageProvider: StorageProvider | null = null;
 let embeddingProvider: EmbeddingProvider | null = null;
 
+// Pending-promise guards prevent race conditions where concurrent callers
+// both see null and create duplicate provider instances.
+let storageInitPromise: Promise<StorageProvider> | null = null;
+let embeddingInitPromise: Promise<EmbeddingProvider> | null = null;
+
 /**
  * Get the storage provider (singleton, lazily initialized).
  * Uses SESSIONGRAPH_STORAGE_MODE env var or config to determine which provider.
  * Defaults to "local" (PGlite) if no Supabase credentials are configured.
+ *
+ * Safe for concurrent callers — uses a pending-promise guard so only one
+ * initialization runs at a time.
  */
 export async function getStorageProvider(): Promise<StorageProvider> {
   if (storageProvider) return storageProvider;
+  if (storageInitPromise) return storageInitPromise;
 
-  const mode = config.storage.mode;
+  storageInitPromise = (async () => {
+    const mode = config.storage.mode;
+    let provider: StorageProvider;
 
-  if (mode === "cloud") {
-    const { SupabaseStorageProvider } = await import("./supabase-provider.ts");
-    storageProvider = new SupabaseStorageProvider();
-  } else {
-    const { PGliteStorageProvider } = await import("./pglite.ts");
-    storageProvider = new PGliteStorageProvider();
-  }
+    if (mode === "cloud") {
+      const { SupabaseStorageProvider } = await import("./supabase-provider.ts");
+      provider = new SupabaseStorageProvider();
+    } else {
+      const { PGliteStorageProvider } = await import("./pglite.ts");
+      provider = new PGliteStorageProvider();
+    }
 
-  await storageProvider.initialize();
-  return storageProvider;
+    await provider.initialize();
+    storageProvider = provider;
+    storageInitPromise = null;
+    return provider;
+  })();
+
+  return storageInitPromise;
 }
 
 /**
  * Get the embedding provider (singleton, lazily initialized).
  * For cloud mode: uses Supabase Edge Function.
  * For local mode: uses Ollama local embeddings.
+ *
+ * Safe for concurrent callers — uses a pending-promise guard.
  */
 export async function getEmbeddingProvider(): Promise<EmbeddingProvider> {
   if (embeddingProvider) return embeddingProvider;
+  if (embeddingInitPromise) return embeddingInitPromise;
 
-  const mode = config.storage.mode;
+  embeddingInitPromise = (async () => {
+    const mode = config.storage.mode;
+    let provider: EmbeddingProvider;
 
-  if (mode === "local") {
-    const { OllamaEmbeddingProvider } = await import("../embeddings/ollama.ts");
-    embeddingProvider = new OllamaEmbeddingProvider();
-  } else {
-    const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
-    embeddingProvider = new SupabaseEmbeddingProvider();
-  }
+    if (mode === "local") {
+      const { OllamaEmbeddingProvider } = await import("../embeddings/ollama.ts");
+      provider = new OllamaEmbeddingProvider();
+    } else {
+      const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
+      provider = new SupabaseEmbeddingProvider();
+    }
 
-  return embeddingProvider;
+    embeddingProvider = provider;
+    embeddingInitPromise = null;
+    return provider;
+  })();
+
+  return embeddingInitPromise;
 }
 
 /**
  * Reset providers (for testing or reconfiguration).
  */
 export async function resetProviders(): Promise<void> {
+  // Wait for any in-flight initialization before closing
+  if (storageInitPromise) await storageInitPromise.catch(() => {});
+  if (embeddingInitPromise) await embeddingInitPromise.catch(() => {});
+
   if (storageProvider) {
     await storageProvider.close();
     storageProvider = null;
   }
   embeddingProvider = null;
+  storageInitPromise = null;
+  embeddingInitPromise = null;
 }
