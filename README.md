@@ -108,11 +108,14 @@ Relations are created automatically via `sessiongraph link` or manually when cal
 sessiongraph init             # interactive setup (one time)
 sessiongraph search "query"   # search your reasoning history
 sessiongraph sessions         # list recent sessions
-sessiongraph timeline         # show recent activity (MCP only)
 sessiongraph backfill         # extract reasoning from past sessions
 sessiongraph link             # auto-link related chains via embeddings
 sessiongraph login            # authenticate for cloud sync
+sessiongraph signup           # create a cloud account
+sessiongraph logout           # clear stored credentials
 sessiongraph status           # show sync status
+sessiongraph sync             # sync local data to cloud
+sessiongraph mcp              # start the MCP server (stdio)
 ```
 
 ## Architecture

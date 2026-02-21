@@ -5,7 +5,7 @@
 An embedding is a list of numbers (a vector) that represents the **meaning** of a piece of text. For example:
 
 ```
-"I chose Postgres over SQLite" → [0.12, -0.45, 0.78, 0.33, ...]  (768 numbers)
+"I chose Postgres over SQLite" → [0.12, -0.45, 0.78, 0.33, ...]  (1024 numbers)
 "I picked Postgres instead of SQLite" → [0.11, -0.44, 0.79, 0.32, ...]  (very similar numbers)
 "I like pizza" → [0.91, 0.22, -0.56, 0.01, ...]  (very different numbers)
 ```
@@ -26,7 +26,7 @@ You could, but it fails on meaning. If you stored "Chose PGlite for local storag
 
 Embedding models are simpler and faster than chat LLMs. They share similar architecture (transformers, trained on text), but serve different purposes:
 
-| | Chat LLM (llama3.1:8b) | Embedding model (nomic-embed-text) |
+| | Chat LLM (qwen2.5:3b) | Embedding model (qwen3-embedding:0.6b) |
 |---|---|---|
 | **Input** | Text | Text |
 | **Output** | More text (generated) | A fixed-size list of numbers |
@@ -41,7 +41,7 @@ The backfill pipeline processes old AI coding sessions to extract reasoning chai
 
 ### Stage 1: Extraction (Chat LLM)
 
-Ollama loads the chat model (`llama3.1:8b`) and reads the raw conversation text from an old OpenCode session. The LLM identifies reasoning chains -- decisions, rejections, insights, explorations, solutions -- from the conversation. This is the "thinking" step; it requires a generative model that can understand context and produce structured output.
+Ollama loads the chat model (`qwen2.5:3b`) and reads the raw conversation text from an old OpenCode session. The LLM identifies reasoning chains -- decisions, rejections, insights, explorations, solutions -- from the conversation. This is the "thinking" step; it requires a generative model that can understand context and produce structured output.
 
 This happens in `src/backfill/ollama-extractor.ts`.
 
@@ -55,7 +55,7 @@ During backfill, Ollama alternates between the two models for each session:
 
 ```
 For each session:
-  1. Load llama3.1:8b → extract reasoning chains from conversation
+  1. Load qwen2.5:3b → extract reasoning chains from conversation
   2. Load embedding model → vectorize each chain's text
   3. Store chains + vectors in PGlite
   4. Repeat for next session
@@ -70,6 +70,6 @@ Outside of backfill (normal usage), only the **embedding model** runs:
 - **`remember`** -- embeds the reasoning text and stores it with its vector
 - **`recall`** -- embeds your search query and finds stored chains with similar vectors
 
-The extraction model (`llama3.1:8b`) isn't needed during normal usage because the AI agent does the extraction in real-time via the `auto-reasoning-capture` skill. The agent identifies reasoning chains as they happen and calls `remember` directly -- no post-hoc extraction needed.
+The extraction model (`qwen2.5:3b`) isn't needed during normal usage because the AI agent does the extraction in real-time via the `auto-reasoning-capture` skill. The agent identifies reasoning chains as they happen and calls `remember` directly -- no post-hoc extraction needed.
 
 This is why backfill exists: it retroactively processes old sessions that happened before SessionGraph was installed.
