@@ -29,8 +29,8 @@ Rules:
 /** Max chars to send to Ollama. qwen2.5:3b works well at 8K context — ~20K chars (~5K tokens) */
 const MAX_CONVERSATION_LENGTH = 20_000;
 
-/** Timeout for chat/extraction requests (90 seconds — qwen2.5:3b is fast) */
-const CHAT_TIMEOUT_MS = 90_000;
+/** Timeout for chat/extraction requests (5 minutes — some sessions need extended processing) */
+const CHAT_TIMEOUT_MS = 300_000;
 
 const VALID_TYPES = new Set<string>(["decision", "exploration", "rejection", "solution", "insight"]);
 

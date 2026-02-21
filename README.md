@@ -4,179 +4,139 @@
 
 Your AI coding sessions produce two things: code changes and the reasoning that led to them. Git saves the code. Nothing saves the reasoning. Three months later you're staring at an architecture decision and have no idea why you (and Claude) chose this approach over the three alternatives you explored and rejected.
 
-SessionGraph runs in the background, captures the reasoning chains from all your AI agent sessions, and makes them searchable — so you never lose the "why" behind any decision.
+SessionGraph captures reasoning chains from your AI coding sessions and makes them semantically searchable — so you never lose the "why" behind any decision.
 
-**CLAUDE.md saves conclusions. Mem0 saves facts. SessionGraph saves the reasoning — the exploration, the rejected alternatives, the tradeoffs that led to the decision.**
+## How Is This Different From CLAUDE.md?
+
+CLAUDE.md (or AGENTS.md, CONVENTIONS.md, etc.) is great for active instructions — things the agent should know right now. Some people even use auto-update skills to keep it maintained. SessionGraph solves a different problem.
+
+|  | **CLAUDE.md + Auto-Update** | **SessionGraph** |
+|---|---|---|
+| **What it captures** | Conclusions and rules — "use Zustand not Redux" | Full reasoning — "evaluated Redux, Zustand, Jotai; rejected Redux because X; picked Zustand because Y" |
+| **Search** | Ctrl+F / grep (keyword match only) | Semantic search — "state management decision" finds results even if those exact words weren't used |
+| **Scope** | Single project | Cross-project — search reasoning from any session across all your repos |
+| **History** | Overwritten as project evolves. Old reasoning lost. | Append-only — reasoning from 6 months ago is still searchable |
+| **Context cost** | Loaded into every session in full, whether relevant or not | Zero cost until queried — only relevant chains retrieved on demand |
+| **Onboarding** | Blank file — value builds over weeks | Backfill existing sessions — searchable history in minutes |
+| **Failure mode** | Agent writes garbage, corrupts useful content | Worst case: low-quality extraction gets ignored by search |
+| **Privacy** | In your repo — could accidentally commit secrets | Local database, never in version control |
+| **Setup** | Create a file | Install MCP server + Ollama (local) or create account (cloud) |
+| **Best for** | "What should the agent do right now in this project?" | "Why did we make that decision 3 months ago?" |
+
+**They're complementary, not competitive.** Use CLAUDE.md for active project instructions. Use SessionGraph for searchable reasoning history across projects and time.
 
 ## How It Works
 
-### Setup (one time)
+### Real-Time Capture (Primary)
+
+An [auto-reasoning-capture skill](skills/auto-reasoning-capture/SKILL.md) runs silently during your AI coding sessions. When the agent makes a significant decision, rejects an approach, or discovers something important, it calls `remember` automatically. No manual intervention needed.
+
+### Backfill (Onboarding)
+
+Already have hundreds of AI coding sessions? Run the backfill to extract reasoning from your existing history:
 
 ```bash
-npm install -g sessiongraph
-sessiongraph login
+sessiongraph backfill
 ```
 
-Then add SessionGraph as an MCP server in your AI tool's config. Done.
+This parses your past sessions, extracts reasoning chains via a local LLM (Ollama), generates vector embeddings, and makes everything searchable immediately.
 
-### Daily workflow
+### Search
 
-You code with AI as normal — nothing changes. Behind the scenes:
+Later, when you (or your AI agent) need context:
 
+```bash
+sessiongraph search "why did we pick Supabase over PGlite?"
 ```
-You're coding with your AI tool (OpenCode, Claude Code, Aider, etc.)
-        |
-        v
-Your AI tool spawns SessionGraph as an MCP server (stdio)
-        |
-        v
-SessionGraph reads your AI tool's session database
-        |
-        v
-It finds new sessions/messages since last sync
-        |
-        v
-It extracts reasoning chains from the conversation:
-  - "We chose Supabase because X, Y, Z"         -> decision
-  - "We considered PGlite but rejected it"        -> rejection
-  - "The root cause was the WAL lock"             -> insight
-        |
-        v
-Each reasoning chain gets a vector embedding
-(via Supabase Edge Function, gte-small model)
-        |
-        v
-Everything is stored in Supabase (Postgres + pgvector)
-        |
-        v
-Later, when an AI agent calls recall("why did we pick Supabase")
-        |
-        v
-SessionGraph does a vector similarity search, finds the relevant
-reasoning chains, and returns them to the agent
-        |
-        v
-The agent now has context it never would have had otherwise
-```
+
+Or the agent calls `recall("authentication strategy")` and gets back the full reasoning chain — the alternatives considered, the tradeoffs weighed, and the final decision.
 
 ### MCP Tools
 
-Your AI agents get four tools:
+Your AI agents get six tools via MCP:
 
-| Tool | What it does | Example |
-|------|-------------|---------|
-| `remember` | AI agent explicitly saves something important | Agent decides on an architecture — calls `remember` to save the reasoning |
-| `recall` | AI agent asks "what do I know about X?" | Agent calls `recall("authentication strategy")` — gets back past decisions |
-| `timeline` | "What happened recently?" | Shows last 10 sessions and key decisions, chronologically |
-| `sessions` | "Show me past sessions" | Lists sessions filtered by project or tool |
-
-### Offline
-
-SessionGraph works offline. It writes to a local SQLite buffer and syncs to Supabase when the connection returns.
+| Tool | What it does |
+|------|-------------|
+| `remember` | Save a reasoning chain (decision, insight, rejection, etc.) |
+| `recall` | Semantic search — "what do I know about X?" |
+| `timeline` | Recent sessions with their reasoning chains, chronologically |
+| `sessions` | List past sessions, filterable by project or tool |
+| `get_sessions_to_backfill` | Get unprocessed sessions for agent-driven backfill |
+| `mark_session_backfilled` | Mark a session as processed |
 
 ### CLI
 
 ```bash
-sessiongraph login          # authenticate (one time)
-sessiongraph search "query" # search your reasoning history
-sessiongraph status         # show sync status
-sessiongraph sessions       # list recent sessions
+sessiongraph init             # interactive setup (one time)
+sessiongraph search "query"   # search your reasoning history
+sessiongraph sessions         # list recent sessions
+sessiongraph timeline         # show recent activity
+sessiongraph backfill         # extract reasoning from past sessions
+sessiongraph login            # authenticate for cloud sync
+sessiongraph status           # show sync status
 ```
+
+## Architecture
+
+SessionGraph runs in two modes:
+
+**Local (default):** Everything stays on your machine. No account needed.
+
+```
+Your AI Tool (OpenCode, Claude Code, etc.)
+        |
+        v
+MCP Server (stdio) ──── auto-reasoning-capture skill
+        |                  calls remember/recall silently
+        v
+PGlite (embedded Postgres + pgvector)
+        |
+        v
+Local Ollama (qwen3-embedding for vectors, qwen2.5:3b for extraction)
+```
+
+**Cloud (optional):** Supabase-hosted Postgres for sync across machines and future team features.
+
+### Storage
+
+| Mode | Database | Embeddings | Account Required |
+|------|----------|-----------|-----------------|
+| Local (default) | PGlite (embedded Postgres) | Ollama (qwen3-embedding:0.6b, 1024 dims) | No |
+| Cloud | Supabase (hosted Postgres + pgvector) | Supabase Edge Functions | Yes |
+
+## Supported AI Tools
+
+| Tool | Status | Data Source |
+|------|--------|-------------|
+| OpenCode | Working | SQLite DB at `~/.local/share/opencode/opencode.db` |
+| Claude Code | Parser built, untested | JSONL at `~/.claude/projects/` |
+| Aider | Planned | Markdown at `.aider.chat.history.md` |
+| Cursor | Planned | SQLite in VS Code workspace storage |
+| Windsurf | Planned | TBD |
+
+## Reasoning Chain Types
+
+SessionGraph captures five types of reasoning:
+
+| Type | Color | What it captures |
+|------|-------|-----------------|
+| **decision** | Blue | A choice was made between alternatives, with reasoning |
+| **exploration** | Violet | Multiple options being weighed, no conclusion yet |
+| **rejection** | Red | Something explicitly ruled out with a reason |
+| **solution** | Green | A problem was identified and solved |
+| **insight** | Amber | A standalone learning or discovery |
 
 ## Tech Stack
 
 - **Runtime:** Bun + TypeScript
-- **Database:** Supabase (hosted Postgres + pgvector)
-- **Embeddings:** Supabase Edge Functions (gte-small, 384 dims)
-- **Offline buffer:** SQLite (via bun:sqlite)
+- **Local database:** PGlite (embedded Postgres + pgvector)
+- **Cloud database:** Supabase (hosted Postgres + pgvector)
+- **Local embeddings:** Ollama (qwen3-embedding:0.6b, 1024 dims)
+- **Local extraction:** Ollama (qwen2.5:3b)
 - **MCP:** @modelcontextprotocol/sdk (stdio transport)
-- **Auth:** Supabase Auth
+- **Web dashboard:** Next.js 15, Tailwind CSS v4, shadcn/ui
+- **Auth:** Supabase Auth (cloud mode only)
 
-## Architecture
+## License
 
-```
-User's Machine                              Cloud (Supabase)
-+------------------------------+     +-------------------------+
-|     MCP Server Process       |     |    Supabase Project     |
-|                              |     |                         |
-|  +----------+ +-----------+  |     |  +------------------+  |
-|  |MCP Tools | |  Session   |  |     |  |  PostgreSQL +    |  |
-|  | (stdio)  | |  Parsers   |  |     |  |  pgvector        |  |
-|  +----+-----+ +-----+-----+  |     |  +------------------+  |
-|       +------+------+        |     |                         |
-|       +------v------+        |     |  +------------------+  |
-|       |  Ingestion  |        |     |  |  Edge Functions   |  |
-|       |  Pipeline   |        |     |  |  (embeddings)     |  |
-|       +------+------+        |     |  +------------------+  |
-|       +------v------+        |     |                         |
-|       |Local Buffer |  sync  |     |  +------------------+  |
-|       |  (SQLite)   |----------->  |  |  Supabase Auth   |  |
-|       +-------------+        |     |  +------------------+  |
-+------------------------------+     +-------------------------+
-```
-
-## Supported AI Tools
-
-| Tool | Parser Status | Data Source |
-|------|--------------|-------------|
-| OpenCode | v1 (first) | SQLite DB at `~/.local/share/opencode/opencode.db` |
-| Claude Code | Planned | JSON/MD at `~/.claude/projects/` |
-| Aider | Planned | Markdown at `.aider.chat.history.md` per project |
-| Cursor | Future | SQLite in VS Code workspace storage |
-| GitHub Copilot Chat | Future | JSON in VS Code global storage |
-| Windsurf | Future | Unknown — needs investigation |
-
-## Reasoning Chain Categories
-
-SessionGraph extracts 5 types of reasoning chains from your AI sessions:
-
-| Type | What it captures | Trigger signals |
-|------|-----------------|-----------------|
-| **decision** | A choice was made between alternatives | "We'll go with X", "Let's use X", "X is the right choice" |
-| **exploration** | Multiple options being weighed, no conclusion yet | "Let's compare X vs Y", "Options are...", "We could do X or Y" |
-| **rejection** | Something explicitly ruled out with a reason | "X won't work because", "We ruled out X", "Don't use X" |
-| **solution** | A problem was identified and solved | "The fix is X", "Root cause was X", "This works because X" |
-| **insight** | A standalone learning or discovery | "TIL", "Interesting — X means Y", "I didn't know that X" |
-
-### What each category should contain
-
-- **decision** — What was chosen, why, and what the alternatives were
-- **exploration** — The options, tradeoffs being discussed, criteria being evaluated
-- **rejection** — What was rejected, why, what the failure or limitation was
-- **solution** — The problem, root cause, the fix, why it works
-- **insight** — The learning, its implications, where it applies
-
-### Boundary rules
-
-- If an exploration leads to a decision in the same turn, extract **both** separately.
-- If something is rejected as part of reaching a decision, extract **both** separately.
-- A solution that involves choosing between fix approaches is a **solution**, not a decision.
-- If unsure between exploration and insight, default to **insight**.
-
-### Example extractions
-
-From a real session about choosing a database:
-
-```
-exploration: "Database choice: SQLite vs Supabase vs PGlite"
-  Compared three options. SQLite: zero-dep, weak vector search.
-  Supabase: hosted Postgres with pgvector, requires internet.
-  PGlite: embedded Postgres, clean upgrade path.
-
-rejection: "PGlite rejected for v1"
-  Rejected despite cleanest upgrade path. Reason: newer project,
-  smaller community, user preferred Supabase's built-in features.
-
-decision: "Supabase chosen as database"
-  Chose Supabase-native over Postgres-portable. Rationale: no
-  enterprise customers yet, ship speed > flexibility.
-
-insight: "Supabase has free built-in embedding model"
-  Supabase Edge Functions include gte-small (384 dims) for free.
-  No OpenAI API key needed. Eliminates embedding cost for v1.
-
-solution: "Embedding cost solved with built-in model"
-  Problem: server-side OpenAI embeddings cost money per user.
-  Fix: use Supabase's built-in gte-small model instead. Free,
-  good enough quality. Upgrade to OpenAI as Pro tier later.
-```
+MIT

@@ -306,7 +306,7 @@ describe("extractWithOllama", () => {
         const err = new DOMException("The operation was aborted", "TimeoutError");
         throw err;
       };
-      await expect(extractWithOllama("text", opts)).rejects.toThrow(/timed out after 90s/);
+      await expect(extractWithOllama("text", opts)).rejects.toThrow(/timed out after 300s/);
     });
 
     test("throws 'not running' error on network failure", async () => {
