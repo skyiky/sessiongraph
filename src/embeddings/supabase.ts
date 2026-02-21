@@ -3,11 +3,11 @@ import { config } from "../config/config.ts";
 import type { EmbeddingProvider } from "../storage/provider.ts";
 
 /**
- * Generates embeddings via Supabase Edge Function (gte-small, 384 dims).
- * Used by both cloud and local modes until Ollama is integrated.
+ * Generates embeddings via Supabase Edge Function (gte-small, 768 dims).
+ * Used for cloud mode. Dimensions should match the Ollama local model.
  */
 export class SupabaseEmbeddingProvider implements EmbeddingProvider {
-  readonly dimensions = 384;
+  readonly dimensions = 768;
   private client: SupabaseClient | null = null;
 
   private getClient(): SupabaseClient {

@@ -105,7 +105,7 @@ export class PGliteStorageProvider implements StorageProvider {
         content TEXT NOT NULL,
         context TEXT,
         tags TEXT[] DEFAULT '{}',
-        embedding vector(384),
+        embedding vector(768),
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
