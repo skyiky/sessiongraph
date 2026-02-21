@@ -128,21 +128,24 @@ export async function getStorageProvider(): Promise<StorageProvider> {
   if (storageInitPromise) return storageInitPromise;
 
   storageInitPromise = (async () => {
-    const mode = config.storage.mode;
-    let provider: StorageProvider;
+    try {
+      const mode = config.storage.mode;
+      let provider: StorageProvider;
 
-    if (mode === "cloud") {
-      const { SupabaseStorageProvider } = await import("./supabase-provider.ts");
-      provider = new SupabaseStorageProvider();
-    } else {
-      const { PGliteStorageProvider } = await import("./pglite.ts");
-      provider = new PGliteStorageProvider();
+      if (mode === "cloud") {
+        const { SupabaseStorageProvider } = await import("./supabase-provider.ts");
+        provider = new SupabaseStorageProvider();
+      } else {
+        const { PGliteStorageProvider } = await import("./pglite.ts");
+        provider = new PGliteStorageProvider();
+      }
+
+      await provider.initialize();
+      storageProvider = provider;
+      return provider;
+    } finally {
+      storageInitPromise = null;
     }
-
-    await provider.initialize();
-    storageProvider = provider;
-    storageInitPromise = null;
-    return provider;
   })();
 
   return storageInitPromise;
@@ -160,20 +163,23 @@ export async function getEmbeddingProvider(): Promise<EmbeddingProvider> {
   if (embeddingInitPromise) return embeddingInitPromise;
 
   embeddingInitPromise = (async () => {
-    const mode = config.storage.mode;
-    let provider: EmbeddingProvider;
+    try {
+      const mode = config.storage.mode;
+      let provider: EmbeddingProvider;
 
-    if (mode === "local") {
-      const { OllamaEmbeddingProvider } = await import("../embeddings/ollama.ts");
-      provider = new OllamaEmbeddingProvider();
-    } else {
-      const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
-      provider = new SupabaseEmbeddingProvider();
+      if (mode === "local") {
+        const { OllamaEmbeddingProvider } = await import("../embeddings/ollama.ts");
+        provider = new OllamaEmbeddingProvider();
+      } else {
+        const { SupabaseEmbeddingProvider } = await import("../embeddings/supabase.ts");
+        provider = new SupabaseEmbeddingProvider();
+      }
+
+      embeddingProvider = provider;
+      return provider;
+    } finally {
+      embeddingInitPromise = null;
     }
-
-    embeddingProvider = provider;
-    embeddingInitPromise = null;
-    return provider;
   })();
 
   return embeddingInitPromise;

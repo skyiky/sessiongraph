@@ -97,6 +97,19 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       );
     }
 
-    return (await response.json()) as OllamaEmbedResponse;
+    const data = await response.json();
+
+    // Validate response shape
+    if (
+      !data ||
+      typeof data !== "object" ||
+      !Array.isArray((data as OllamaEmbedResponse).embeddings)
+    ) {
+      throw new Error(
+        `Ollama returned unexpected response shape. Expected { embeddings: number[][] }, got: ${JSON.stringify(data).slice(0, 200)}`
+      );
+    }
+
+    return data as OllamaEmbedResponse;
   }
 }

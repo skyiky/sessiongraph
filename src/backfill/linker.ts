@@ -1,8 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { config } from "../config/config.ts";
-import { getStorageProvider, getEmbeddingProvider } from "../storage/provider.ts";
-import type { StorageProvider } from "../storage/provider.ts";
+import { getStorageProvider } from "../storage/provider.ts";
 import type { ChainWithEmbedding, RelationType, ChainRelation } from "../config/types.ts";
 import { RELATION_TYPES, BIDIRECTIONAL_RELATIONS } from "../config/types.ts";
 
@@ -217,7 +216,9 @@ function cosineSimilarity(a: number[], b: number[]): number {
     normA += ai * ai;
     normB += bi * bi;
   }
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0) return 0;
+  return dot / denom;
 }
 
 // --- Main linker ---

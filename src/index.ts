@@ -3,33 +3,31 @@ import { Command } from "commander";
 import { config } from "./config/config.ts";
 import { getStorageProvider, getEmbeddingProvider, resetProviders } from "./storage/provider.ts";
 import { runInit } from "./cli/init.ts";
-import { runBackfill } from "./backfill/backfill.ts";
+import { runBackfill, requestBackfillStop } from "./backfill/backfill.ts";
 import { runLinker } from "./backfill/linker.ts";
 
 const program = new Command();
 
 /**
- * Parse a string as a positive integer, or exit with an error.
+ * Parse a string as a positive integer, or throw with a clear error.
  * Used as a Commander argParser for --limit, --threads, etc.
  */
 function parsePositiveInt(value: string, flagName: string): number {
   const n = parseInt(value, 10);
   if (!Number.isFinite(n) || n <= 0) {
-    console.error(`Error: --${flagName} must be a positive integer, got '${value}'`);
-    process.exit(1);
+    throw new Error(`--${flagName} must be a positive integer, got '${value}'`);
   }
   return n;
 }
 
 /**
- * Parse a string as a positive number (float allowed), or exit with an error.
+ * Parse a string as a positive number (float allowed), or throw with a clear error.
  * Used for --delay which accepts fractional seconds.
  */
 function parsePositiveNumber(value: string, flagName: string): number {
   const n = parseFloat(value);
   if (!Number.isFinite(n) || n < 0) {
-    console.error(`Error: --${flagName} must be a non-negative number, got '${value}'`);
-    process.exit(1);
+    throw new Error(`--${flagName} must be a non-negative number, got '${value}'`);
   }
   return n;
 }
@@ -40,23 +38,22 @@ program
   .version("0.2.0");
 
 /**
- * Helper: require cloud mode for a command, exit with a clear error if local.
+ * Helper: require cloud mode for a command, throw with a clear error if local.
  */
 function requireCloudMode(commandName: string): void {
   if (config.storage.mode !== "cloud") {
-    console.error(
-      `Error: '${commandName}' requires cloud mode.\n` +
+    throw new Error(
+      `'${commandName}' requires cloud mode.\n` +
         `Current mode: ${config.storage.mode}\n` +
         `Set SESSIONGRAPH_STORAGE_MODE=cloud to use this command.`
     );
-    process.exit(1);
   }
 }
 
 /**
  * Helper: resolve the current user ID.
  * - Local mode: fixed user ID, no auth.
- * - Cloud mode: loads auth.json, exits if not authenticated.
+ * - Cloud mode: loads auth.json, throws if not authenticated.
  */
 async function resolveUserId(): Promise<string> {
   if (config.storage.mode === "local") {
@@ -66,8 +63,7 @@ async function resolveUserId(): Promise<string> {
   const { loadAuth } = await import("./auth/auth.ts");
   const auth = await loadAuth();
   if (!auth) {
-    console.error("Not authenticated. Run 'sessiongraph login' first.");
-    process.exit(1);
+    throw new Error("Not authenticated. Run 'sessiongraph login' first.");
   }
 
   // Set auth on the Supabase provider if needed
@@ -309,6 +305,19 @@ program
 
     const startTime = Date.now();
 
+    // Handle Ctrl+C gracefully — finish current session, then stop
+    const sigintHandler = () => {
+      console.log("\n\nCtrl+C received — finishing current session before stopping...");
+      console.log("(Press Ctrl+C again to force quit)\n");
+      requestBackfillStop();
+      // On second Ctrl+C, force exit
+      process.once("SIGINT", () => {
+        console.log("\nForce quit.");
+        process.exit(1);
+      });
+    };
+    process.once("SIGINT", sigintHandler);
+
     const result = await runBackfill({
       tool: opts.tool,
       limit,
@@ -345,6 +354,10 @@ program
         }
       },
     });
+
+    // Remove SIGINT handler after backfill completes
+    process.removeListener("SIGINT", sigintHandler);
+
     const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\nDone in ${totalElapsed}s! Processed ${result.sessionsProcessed} sessions, extracted ${result.chainsExtracted} chains.`);
     if (result.sessionsSkipped > 0) console.log(`Skipped ${result.sessionsSkipped} sessions (too short or empty).`);

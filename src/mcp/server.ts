@@ -4,6 +4,7 @@ import * as z from "zod/v4";
 import {
   getStorageProvider,
   getEmbeddingProvider,
+  resetProviders,
   type StorageProvider,
   type EmbeddingProvider,
 } from "../storage/provider.ts";
@@ -11,10 +12,12 @@ import { REASONING_TYPES, RELATION_TYPES, BIDIRECTIONAL_RELATIONS } from "../con
 import type { RelationType } from "../config/types.ts";
 import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { isOpenCodeAvailable, getNewSessions as getOpenCodeSessions, parseSession as parseOpenCodeSession } from "../ingestion/parsers/opencode.ts";
 import { isClaudeCodeAvailable, getNewSessions as getClaudeCodeSessions, parseSession as parseClaudeCodeSession } from "../ingestion/parsers/claude-code.ts";
+import { loadBackfillState, saveBackfillState, markSessionBackfilled } from "../backfill/backfill.ts";
+import type { BackfillState } from "../backfill/backfill.ts";
 
 const server = new McpServer({
   name: "sessiongraph",
@@ -317,7 +320,7 @@ server.registerTool(
     description:
       "Explore the reasoning graph — find chains related to a given chain by following relationship edges. Returns connected chains with their relationship types and directions. Use chain IDs from recall or remember results.",
     inputSchema: z.object({
-      chain_id: z.string().describe("The ID of the reasoning chain to explore connections for"),
+      chain_id: z.string().uuid().describe("The ID of the reasoning chain to explore connections for"),
       relation_type: z.enum(RELATION_TYPES).optional().describe("Filter to a specific relation type (e.g. 'builds_on', 'contradicts')"),
       limit: z.number().default(20).describe("Maximum number of related chains to return"),
     }),
@@ -364,27 +367,6 @@ server.registerTool(
     };
   }
 );
-
-// ---- Backfill state helpers ----
-
-const BACKFILL_STATE_PATH = join(config.paths.dataDir, "backfill-state.json");
-
-function loadBackfillState(): { backfilledSessionIds: string[] } {
-  try {
-    if (existsSync(BACKFILL_STATE_PATH)) {
-      return JSON.parse(readFileSync(BACKFILL_STATE_PATH, "utf-8"));
-    }
-  } catch {}
-  return { backfilledSessionIds: [] };
-}
-
-function saveBackfillState(state: { backfilledSessionIds: string[] }): void {
-  const dir = config.paths.dataDir;
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  writeFileSync(BACKFILL_STATE_PATH, JSON.stringify(state, null, 2));
-}
 
 // ---- Tool: get_sessions_to_backfill ----
 server.registerTool(
@@ -501,10 +483,8 @@ server.registerTool(
 
     // Deduplicate
     if (!state.backfilledSessionIds.includes(input.sessionId)) {
-      state.backfilledSessionIds.push(input.sessionId);
+      markSessionBackfilled(state, input.sessionId);
     }
-
-    saveBackfillState(state);
 
     return {
       content: [
@@ -525,6 +505,20 @@ async function main() {
     `SessionGraph MCP server running on stdio (${config.storage.mode} mode)`
   );
 }
+
+// ---- Graceful shutdown ----
+async function shutdown(signal: string) {
+  console.error(`\nReceived ${signal}, shutting down...`);
+  try {
+    await resetProviders();
+  } catch (err) {
+    console.error("Error during shutdown:", err);
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 main().catch((err) => {
   console.error("Fatal error:", err);

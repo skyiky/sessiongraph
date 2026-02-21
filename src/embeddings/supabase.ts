@@ -33,6 +33,11 @@ export class SupabaseEmbeddingProvider implements EmbeddingProvider {
     });
 
     if (error) throw new Error(`Failed to generate embedding: ${error.message}`);
+    if (!data || !Array.isArray(data.embedding)) {
+      throw new Error(
+        `Supabase embedding response missing 'embedding' array. Got: ${JSON.stringify(data).slice(0, 200)}`
+      );
+    }
     return data.embedding;
   }
 
@@ -52,6 +57,12 @@ export class SupabaseEmbeddingProvider implements EmbeddingProvider {
       if (error) {
         throw new Error(
           `Failed to generate embeddings (batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(texts.length / BATCH_SIZE)}): ${error.message}`
+        );
+      }
+
+      if (!data || !Array.isArray(data.embeddings)) {
+        throw new Error(
+          `Supabase batch embedding response missing 'embeddings' array. Got: ${JSON.stringify(data).slice(0, 200)}`
         );
       }
 

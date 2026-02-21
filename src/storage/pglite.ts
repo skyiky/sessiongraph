@@ -23,7 +23,6 @@ import type {
   SessionListEntry,
   TimelineEntry,
 } from "../config/types.ts";
-import { RELATION_TYPES } from "../config/types.ts";
 
 /** Fixed user ID for local single-user mode. Keeps schema compatible with cloud sync. */
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -410,6 +409,10 @@ export class PGliteStorageProvider implements StorageProvider {
     const params: any[] = [];
     let paramIdx = 1;
 
+    if (opts.userId) {
+      conditions.push(`s.user_id = $${paramIdx++}`);
+      params.push(opts.userId);
+    }
     if (opts.project) {
       conditions.push(`s.project = $${paramIdx++}`);
       params.push(opts.project);

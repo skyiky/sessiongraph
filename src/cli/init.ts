@@ -13,11 +13,11 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
-import { join, dirname, resolve } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
 import { detectEnvironment } from "./detect.ts";
-import type { DetectionResult, OllamaStatus, DetectedTool } from "./detect.ts";
-import { runBackfill } from "../backfill/backfill.ts";
+import type { DetectionResult, OllamaStatus } from "./detect.ts";
+import { runBackfill, requestBackfillStop } from "../backfill/backfill.ts";
 import type { BackfillProgress } from "../backfill/backfill.ts";
 import { config } from "../config/config.ts";
 
@@ -360,6 +360,14 @@ async function backfillWithOllama(totalSessions: number): Promise<void> {
     `${dim(`(${totalSessions} session(s))`)}\n\n`
   );
 
+  // Handle Ctrl+C gracefully
+  const sigintHandler = () => {
+    process.stdout.write(`\n\n${yellow("!")} Ctrl+C — finishing current session...\n`);
+    requestBackfillStop();
+    process.once("SIGINT", () => process.exit(1));
+  };
+  process.once("SIGINT", sigintHandler);
+
   try {
     const result = await runBackfill({
       onProgress: (progress: BackfillProgress) => {
@@ -399,6 +407,8 @@ async function backfillWithOllama(totalSessions: number): Promise<void> {
       `\n${red("✗")} Backfill failed: ${message}\n` +
       `${dim("You can retry later with:")} ${cyan("sessiongraph backfill")}\n`
     );
+  } finally {
+    process.removeListener("SIGINT", sigintHandler);
   }
 }
 
