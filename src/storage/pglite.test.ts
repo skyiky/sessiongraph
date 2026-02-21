@@ -1,6 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { PGliteStorageProvider } from "./pglite.ts";
 
+/** The fixed local user ID used by PGlite provider for all data */
+const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 /**
  * End-to-end tests for PGlite storage provider.
  * Tests all CRUD operations and vector similarity search.
@@ -50,7 +53,7 @@ describe("PGliteStorageProvider", () => {
   test("upsertSession creates a session", async () => {
     const id = await provider.upsertSession({
       id: "test-session-1",
-      userId: "local",
+      userId: LOCAL_USER_ID,
       tool: "opencode",
       project: "sessiongraph",
       startedAt: new Date("2026-02-19T10:00:00Z"),
@@ -63,7 +66,7 @@ describe("PGliteStorageProvider", () => {
   test("upsertSession updates an existing session", async () => {
     const id = await provider.upsertSession({
       id: "test-session-1",
-      userId: "local",
+      userId: LOCAL_USER_ID,
       tool: "opencode",
       project: "sessiongraph",
       startedAt: new Date("2026-02-19T10:00:00Z"),
@@ -77,7 +80,7 @@ describe("PGliteStorageProvider", () => {
 
   test("listSessions returns sessions with chain counts", async () => {
     const sessions = await provider.listSessions({
-      userId: "local",
+      userId: LOCAL_USER_ID,
     });
 
     expect(sessions.length).toBe(1);
@@ -90,7 +93,7 @@ describe("PGliteStorageProvider", () => {
     // Add another session with different project
     await provider.upsertSession({
       id: "test-session-2",
-      userId: "local",
+      userId: LOCAL_USER_ID,
       tool: "claude-code",
       project: "other-project",
       startedAt: new Date("2026-02-19T12:00:00Z"),
@@ -98,7 +101,7 @@ describe("PGliteStorageProvider", () => {
     });
 
     const filtered = await provider.listSessions({
-      userId: "local",
+      userId: LOCAL_USER_ID,
       project: "sessiongraph",
     });
 
@@ -108,7 +111,7 @@ describe("PGliteStorageProvider", () => {
 
   test("listSessions filters by tool", async () => {
     const filtered = await provider.listSessions({
-      userId: "local",
+      userId: LOCAL_USER_ID,
       tool: "claude-code",
     });
 
@@ -121,7 +124,7 @@ describe("PGliteStorageProvider", () => {
   test("insertReasoningChain inserts a chain without embedding", async () => {
     const id = await provider.insertReasoningChain({
       sessionId: "test-session-1",
-      userId: "local",
+      userId: LOCAL_USER_ID,
       type: "decision",
       title: "Chose PGlite for local storage",
       content: "We chose PGlite over SQLite because pgvector works in PGlite.",
@@ -138,7 +141,7 @@ describe("PGliteStorageProvider", () => {
 
     const id = await provider.insertReasoningChain({
       sessionId: "test-session-1",
-      userId: "local",
+      userId: LOCAL_USER_ID,
       type: "insight",
       title: "PGlite supports pgvector",
       content: "PGlite has built-in support for the pgvector extension, enabling local vector search.",
@@ -156,7 +159,7 @@ describe("PGliteStorageProvider", () => {
     const ids = await provider.insertReasoningChains([
       {
         sessionId: "test-session-1",
-        userId: "local",
+        userId: LOCAL_USER_ID,
         type: "rejection",
         title: "Rejected SQLite for vector search",
         content: "SQLite has no production-quality vector search extension.",
@@ -165,7 +168,7 @@ describe("PGliteStorageProvider", () => {
       },
       {
         sessionId: "test-session-2",
-        userId: "local",
+        userId: LOCAL_USER_ID,
         type: "solution",
         title: "Fixed embedding cost with built-in model",
         content: "Used Supabase gte-small instead of OpenAI for free embeddings.",
@@ -178,7 +181,7 @@ describe("PGliteStorageProvider", () => {
   });
 
   test("listSessions shows updated chain counts", async () => {
-    const sessions = await provider.listSessions({ userId: "local" });
+    const sessions = await provider.listSessions({ userId: LOCAL_USER_ID });
     const s1 = sessions.find((s) => s.id === "test-session-1");
     const s2 = sessions.find((s) => s.id === "test-session-2");
 
@@ -194,7 +197,7 @@ describe("PGliteStorageProvider", () => {
 
     const results = await provider.searchReasoning({
       queryEmbedding,
-      userId: "local",
+      userId: LOCAL_USER_ID,
       matchThreshold: 0.5,
       limit: 5,
     });
@@ -212,7 +215,7 @@ describe("PGliteStorageProvider", () => {
 
     const results = await provider.searchReasoning({
       queryEmbedding,
-      userId: "local",
+      userId: LOCAL_USER_ID,
       matchThreshold: 0.99,
       limit: 5,
     });
@@ -225,7 +228,7 @@ describe("PGliteStorageProvider", () => {
 
     const results = await provider.searchReasoning({
       queryEmbedding,
-      userId: "local",
+      userId: LOCAL_USER_ID,
       project: "other-project",
       matchThreshold: 0.3,
       limit: 10,
@@ -241,7 +244,7 @@ describe("PGliteStorageProvider", () => {
 
   test("getTimeline returns sessions with chains", async () => {
     const entries = await provider.getTimeline({
-      userId: "local",
+      userId: LOCAL_USER_ID,
       limit: 10,
     });
 
@@ -254,7 +257,7 @@ describe("PGliteStorageProvider", () => {
 
   test("getTimeline filters by project", async () => {
     const entries = await provider.getTimeline({
-      userId: "local",
+      userId: LOCAL_USER_ID,
       project: "sessiongraph",
     });
 
@@ -269,14 +272,14 @@ describe("PGliteStorageProvider", () => {
     await provider.insertSessionChunks([
       {
         sessionId: "test-session-1",
-        userId: "local",
+        userId: LOCAL_USER_ID,
         role: "user",
         content: "Help me build a database",
         chunkIndex: 0,
       },
       {
         sessionId: "test-session-1",
-        userId: "local",
+        userId: LOCAL_USER_ID,
         role: "assistant",
         content: "I'll help you set up PGlite...",
         chunkIndex: 1,
@@ -291,7 +294,7 @@ describe("PGliteStorageProvider", () => {
 
     const id = await provider.insertReasoningChain({
       sessionId: null,
-      userId: "local",
+      userId: LOCAL_USER_ID,
       type: "exploration",
       title: "Exploring Ollama vs OpenAI for backfill",
       content: "Comparing Ollama (free, local) vs OpenAI (paid, cloud) for batch extraction.",
@@ -305,7 +308,7 @@ describe("PGliteStorageProvider", () => {
     const queryEmbedding = Array.from({ length: 384 }, (_, i) => Math.sin(i * 0.3) + 0.001);
     const results = await provider.searchReasoning({
       queryEmbedding,
-      userId: "local",
+      userId: LOCAL_USER_ID,
       matchThreshold: 0.9,
       limit: 1,
     });

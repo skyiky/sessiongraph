@@ -45,20 +45,20 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       }
     }
 
-    const allEmbeddings: number[][] = [];
-    for (const text of texts) {
-      const response = await this.callOllama(text);
-      const embedding = response.embeddings[0];
-      if (!embedding) {
-        throw new Error("Ollama returned empty embeddings array");
-      }
-      allEmbeddings.push(embedding);
+    // Ollama /api/embed accepts an array of strings natively — single request
+    const response = await this.callOllama(texts);
+    if (response.embeddings.length !== texts.length) {
+      throw new Error(
+        `Ollama returned ${response.embeddings.length} embeddings for ${texts.length} inputs`
+      );
     }
-    return allEmbeddings;
+    return response.embeddings;
   }
 
-  private async callOllama(input: string): Promise<OllamaEmbedResponse> {
+  private async callOllama(input: string | string[]): Promise<OllamaEmbedResponse> {
     const url = `${this.baseUrl}/api/embed`;
+    const isBatch = Array.isArray(input);
+    const timeoutMs = isBatch ? EMBED_TIMEOUT_MS * Math.min(input.length, 10) : EMBED_TIMEOUT_MS;
 
     let response: Response;
     try {
@@ -66,12 +66,12 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: this.model, input }),
-        signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === "TimeoutError") {
         throw new Error(
-          `Ollama embedding request timed out after ${EMBED_TIMEOUT_MS / 1000}s. ` +
+          `Ollama embedding request timed out after ${timeoutMs / 1000}s. ` +
           `The server may be overloaded or unresponsive.`
         );
       }

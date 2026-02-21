@@ -306,21 +306,46 @@ program
     if (opts.limit) console.log(`  Limit: ${limit} sessions`);
     if (opts.tool) console.log(`  Tool: ${opts.tool}`);
 
+    const startTime = Date.now();
+
     const result = await runBackfill({
       tool: opts.tool,
       limit,
       delayMs,
       ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
-      onProgress: (progress) => {
-        const pct = Math.round((progress.current / progress.total) * 100);
-        process.stdout.write(
-          `\r[${pct}%] ${progress.current}/${progress.total} — ` +
-          `${progress.tool}:${progress.sessionId.slice(0, 8)}… +${progress.chainsExtracted} chains`
-        );
+      onStepProgress: (step) => {
+        const pct = Math.round((step.current / step.total) * 100);
+        const prefix = `[${pct}%] ${step.current}/${step.total}`;
+        const sid = step.sessionId.slice(0, 12);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+
+        switch (step.step) {
+          case "parsing":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Parsing...`);
+            break;
+          case "extracting":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Extracting (${step.detail})...`);
+            break;
+          case "embedding":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Generating embeddings (${step.detail})...`);
+            break;
+          case "saving":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Saving (${step.detail})...`);
+            break;
+          case "done":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Done ${step.detail} [${elapsed}s]\n`);
+            break;
+          case "skipped":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | Skipped (${step.detail}) [${elapsed}s]\n`);
+            break;
+          case "error":
+            process.stdout.write(`\r\x1b[K${prefix} | ${step.tool}:${sid} | ERROR: ${step.detail} [${elapsed}s]\n`);
+            break;
+        }
       },
     });
-    process.stdout.write("\n");
-    console.log(`Done! Processed ${result.sessionsProcessed} sessions, extracted ${result.chainsExtracted} chains.`);
+    const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\nDone in ${totalElapsed}s! Processed ${result.sessionsProcessed} sessions, extracted ${result.chainsExtracted} chains.`);
     if (result.sessionsSkipped > 0) console.log(`Skipped ${result.sessionsSkipped} sessions (too short or empty).`);
     if (result.errors.length > 0) {
       console.log(`${result.errors.length} error(s):`);

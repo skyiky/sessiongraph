@@ -20,6 +20,15 @@ import type { ReasoningChain, Session } from "../config/types.ts";
 
 // --- Types ---
 
+export type BackfillStep =
+  | "parsing"
+  | "extracting"
+  | "embedding"
+  | "saving"
+  | "done"
+  | "skipped"
+  | "error";
+
 export interface BackfillOptions {
   /** Only process sessions from this tool */
   tool?: "opencode" | "claude-code";
@@ -31,8 +40,10 @@ export interface BackfillOptions {
   delayMs?: number;
   /** Ollama runtime options for resource throttling */
   ollamaOptions?: Omit<OllamaOptions, "model" | "baseUrl">;
-  /** Callback for progress updates */
+  /** Callback for progress updates (fires once per completed session) */
   onProgress?: (progress: BackfillProgress) => void;
+  /** Callback for step-level progress within each session */
+  onStepProgress?: (step: StepProgress) => void;
 }
 
 export interface BackfillProgress {
@@ -41,6 +52,15 @@ export interface BackfillProgress {
   sessionId: string;
   tool: string;
   chainsExtracted: number;
+}
+
+export interface StepProgress {
+  current: number;
+  total: number;
+  sessionId: string;
+  tool: string;
+  step: BackfillStep;
+  detail?: string;
 }
 
 export interface BackfillResult {
@@ -223,15 +243,28 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
     ...(opts?.ollamaOptions ?? {}),
   };
 
+  const emitStep = (i: number, entry: SessionEntry, step: BackfillStep, detail?: string) => {
+    opts?.onStepProgress?.({
+      current: i + 1,
+      total,
+      sessionId: entry.id,
+      tool: entry.tool,
+      step,
+      detail,
+    });
+  };
+
   for (let i = 0; i < sessions.length; i++) {
     const entry = sessions[i]!;
 
     try {
       // Parse the session
+      emitStep(i, entry, "parsing");
       const parsed = entry.parse();
       if (!parsed) {
         result.sessionsSkipped++;
         markSessionBackfilled(state, entry.id);
+        emitStep(i, entry, "skipped", "unparseable");
         continue;
       }
 
@@ -240,16 +273,20 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       if (parsed.turnCount < minTurns) {
         result.sessionsSkipped++;
         markSessionBackfilled(state, entry.id);
+        emitStep(i, entry, "skipped", `only ${parsed.turnCount} turns`);
         continue;
       }
 
       // Extract reasoning chains via Ollama
+      const charLen = parsed.conversationText.length;
+      emitStep(i, entry, "extracting", `${parsed.turnCount} turns, ${(charLen / 1000).toFixed(0)}k chars`);
       const chains = await extractWithOllama(parsed.conversationText, ollamaOpts);
 
       // Mark as backfilled even if no chains found
       if (chains.length === 0) {
         result.sessionsSkipped++;
         markSessionBackfilled(state, entry.id);
+        emitStep(i, entry, "done", "0 chains (skipped)");
         opts?.onProgress?.({
           current: i + 1,
           total,
@@ -261,10 +298,12 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       }
 
       // Generate embeddings for all chains
+      emitStep(i, entry, "embedding", `${chains.length} chains`);
       const texts = chains.map((c) => `${c.title}\n${c.content}`);
       const chainEmbeddings = await embeddings.generateEmbeddings(texts);
 
-      // Upsert the session
+      // Upsert the session and insert chains
+      emitStep(i, entry, "saving", `${chains.length} chains`);
       const sessionData: Session = {
         userId: LOCAL_USER_ID,
         tool: entry.tool,
@@ -294,6 +333,7 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       result.chainsExtracted += chains.length;
       markSessionBackfilled(state, entry.id);
 
+      emitStep(i, entry, "done", `+${chains.length} chains`);
       opts?.onProgress?.({
         current: i + 1,
         total,
@@ -305,7 +345,7 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
       const message =
         err instanceof Error ? err.message : String(err);
       result.errors.push(`Session ${entry.id} (${entry.tool}): ${message}`);
-      console.error(`[backfill] Error processing session ${entry.id}:`, message);
+      emitStep(i, entry, "error", message.slice(0, 100));
     }
 
     // Throttle: pause between sessions to keep system responsive

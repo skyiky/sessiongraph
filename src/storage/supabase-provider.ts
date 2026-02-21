@@ -168,16 +168,16 @@ export class SupabaseStorageProvider implements StorageProvider {
       query_embedding: opts.queryEmbedding,
       filter_user_id: opts.userId,
       filter_project: opts.project ?? null,
-      match_threshold: opts.matchThreshold ?? 0.7,
+      match_threshold: opts.matchThreshold ?? 0.3,
       match_count: opts.limit ?? 10,
     });
 
     if (error) throw new Error(`Failed to search reasoning: ${error.message}`);
 
-    return (data ?? []).map((r: any) => ({
+    let results = (data ?? []).map((r: any) => ({
       id: r.id,
       sessionId: r.session_id,
-      type: r.type,
+      type: r.type as ReasoningType,
       title: r.title,
       content: r.content,
       context: r.context,
@@ -185,6 +185,13 @@ export class SupabaseStorageProvider implements StorageProvider {
       similarity: r.similarity,
       createdAt: r.created_at,
     }));
+
+    // Client-side type filter (RPC doesn't support type filtering natively)
+    if (opts.type) {
+      results = results.filter((r) => r.type === opts.type);
+    }
+
+    return results;
   }
 
   // ---- Timeline ----

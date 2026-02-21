@@ -186,6 +186,11 @@ export class PGliteStorageProvider implements StorageProvider {
     const params: any[] = [];
     let paramIdx = 1;
 
+    // userId filter — local mode always has a single user, but filter for parity
+    if (opts.userId) {
+      conditions.push(`s.user_id = $${paramIdx++}`);
+      params.push(opts.userId);
+    }
     if (opts.project) {
       conditions.push(`s.project = $${paramIdx++}`);
       params.push(opts.project);
@@ -262,11 +267,37 @@ export class PGliteStorageProvider implements StorageProvider {
 
   async insertReasoningChains(chains: ReasoningChain[]): Promise<string[]> {
     if (chains.length === 0) return [];
+    const db = await this.getDb();
 
     const ids: string[] = [];
-    for (const chain of chains) {
-      const id = await this.insertReasoningChain(chain);
-      ids.push(id);
+    await db.exec("BEGIN");
+    try {
+      for (const chain of chains) {
+        const embeddingStr = chain.embedding
+          ? toVectorLiteral(chain.embedding)
+          : null;
+
+        const result = await db.query<{ id: string }>(
+          `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
+           RETURNING id`,
+          [
+            chain.sessionId ?? null,
+            LOCAL_USER_ID,
+            chain.type,
+            chain.title,
+            chain.content,
+            chain.context ?? null,
+            chain.tags,
+            embeddingStr,
+          ]
+        );
+        ids.push(result.rows[0]!.id);
+      }
+      await db.exec("COMMIT");
+    } catch (err) {
+      await db.exec("ROLLBACK");
+      throw err;
     }
     return ids;
   }
@@ -280,12 +311,18 @@ export class PGliteStorageProvider implements StorageProvider {
 
     // Build optional project filter
     let projectFilter = "";
+    let typeFilter = "";
     const params: any[] = [embeddingStr, threshold, limit];
     let paramIdx = 4;
 
     if (opts.project) {
       projectFilter = `AND rc.session_id IN (SELECT s.id FROM sessions s WHERE s.project = $${paramIdx++})`;
       params.push(opts.project);
+    }
+
+    if (opts.type) {
+      typeFilter = `AND rc.type = $${paramIdx++}`;
+      params.push(opts.type);
     }
 
     const result = await db.query<{
@@ -311,8 +348,9 @@ export class PGliteStorageProvider implements StorageProvider {
          rc.created_at
        FROM reasoning_chains rc
        WHERE rc.embedding IS NOT NULL
-         AND 1 - (rc.embedding <=> $1::vector) > $2
-         ${projectFilter}
+          AND 1 - (rc.embedding <=> $1::vector) > $2
+          ${projectFilter}
+          ${typeFilter}
        ORDER BY rc.embedding <=> $1::vector
        LIMIT $3`,
       params
@@ -415,12 +453,19 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chunks.length === 0) return;
     const db = await this.getDb();
 
-    for (const chunk of chunks) {
-      await db.query(
-        `INSERT INTO session_chunks (session_id, user_id, role, content, chunk_index)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [chunk.sessionId, LOCAL_USER_ID, chunk.role, chunk.content, chunk.chunkIndex]
-      );
+    await db.exec("BEGIN");
+    try {
+      for (const chunk of chunks) {
+        await db.query(
+          `INSERT INTO session_chunks (session_id, user_id, role, content, chunk_index)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [chunk.sessionId, LOCAL_USER_ID, chunk.role, chunk.content, chunk.chunkIndex]
+        );
+      }
+      await db.exec("COMMIT");
+    } catch (err) {
+      await db.exec("ROLLBACK");
+      throw err;
     }
   }
 }
