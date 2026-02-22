@@ -115,6 +115,7 @@ export class PGliteStorageProvider implements StorageProvider {
         context TEXT,
         tags TEXT[] DEFAULT '{}',
         embedding vector(1024),
+        quality REAL DEFAULT 1.0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
@@ -175,6 +176,12 @@ export class PGliteStorageProvider implements StorageProvider {
     await db.exec(`
       CREATE INDEX IF NOT EXISTS idx_relations_target
         ON chain_relations (target_chain_id);
+    `);
+
+    // ---- Migrations for existing databases ----
+    // Add quality column if it doesn't exist (v0.3 schema upgrade)
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS quality REAL DEFAULT 1.0;
     `);
   }
 
@@ -279,8 +286,8 @@ export class PGliteStorageProvider implements StorageProvider {
       : null;
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
        RETURNING id`,
       [
         chain.sessionId ?? null,
@@ -291,6 +298,7 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.context ?? null,
         chain.tags,
         embeddingStr,
+        chain.quality ?? 1.0,
       ]
     );
 
@@ -301,7 +309,7 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chains.length === 0) return [];
     const db = await this.getDb();
 
-    // Build multi-row VALUES clause for a single INSERT (8 params per row)
+    // Build multi-row VALUES clause for a single INSERT (9 params per row)
     const valueClauses: string[] = [];
     const params: any[] = [];
     let idx = 1;
@@ -312,7 +320,7 @@ export class PGliteStorageProvider implements StorageProvider {
         : null;
 
       valueClauses.push(
-        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector)`
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector, $${idx++})`
       );
       params.push(
         chain.sessionId ?? null,
@@ -323,11 +331,12 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.context ?? null,
         chain.tags,
         embeddingStr,
+        chain.quality ?? 1.0,
       );
     }
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality)
        VALUES ${valueClauses.join(", ")}
        RETURNING id`,
       params
@@ -368,6 +377,7 @@ export class PGliteStorageProvider implements StorageProvider {
       context: string | null;
       tags: string[];
       similarity: number;
+      quality: number;
       created_at: string;
     }>(
       `SELECT
@@ -379,13 +389,14 @@ export class PGliteStorageProvider implements StorageProvider {
          rc.context,
          rc.tags,
          1 - (rc.embedding <=> $1::vector) AS similarity,
+         COALESCE(rc.quality, 1.0) AS quality,
          rc.created_at
        FROM reasoning_chains rc
        WHERE rc.embedding IS NOT NULL
           AND 1 - (rc.embedding <=> $1::vector) > $2
           ${projectFilter}
           ${typeFilter}
-       ORDER BY rc.embedding <=> $1::vector
+       ORDER BY (1 - (rc.embedding <=> $1::vector)) * (0.7 + 0.3 * COALESCE(rc.quality, 1.0)) DESC
        LIMIT $3`,
       params
     );
@@ -399,6 +410,7 @@ export class PGliteStorageProvider implements StorageProvider {
       context: r.context ?? undefined,
       tags: r.tags ?? [],
       similarity: r.similarity,
+      quality: r.quality,
       createdAt: r.created_at,
     }));
   }
@@ -435,9 +447,10 @@ export class PGliteStorageProvider implements StorageProvider {
       tool: string;
       project: string | null;
       started_at: string;
+      ended_at: string | null;
       summary: string | null;
     }>(
-      `SELECT id, tool, project, started_at, summary
+      `SELECT id, tool, project, started_at, ended_at, summary
        FROM sessions s
        ${where}
        ORDER BY started_at DESC
@@ -452,12 +465,16 @@ export class PGliteStorageProvider implements StorageProvider {
     const placeholders = sessionIds.map((_, i) => `$${i + 1}`).join(",");
 
     const chainResult = await db.query<{
+      id: string;
       session_id: string;
       type: string;
       title: string;
       content: string;
+      tags: string[];
+      quality: number;
+      created_at: string;
     }>(
-      `SELECT session_id, type, title, content
+      `SELECT id, session_id, type, title, content, tags, COALESCE(quality, 1.0) AS quality, created_at
        FROM reasoning_chains
        WHERE session_id IN (${placeholders})
        ORDER BY created_at ASC`,
@@ -465,13 +482,17 @@ export class PGliteStorageProvider implements StorageProvider {
     );
 
     // Group chains by session
-    const chainMap = new Map<string, { type: ReasoningType; title: string; content: string }[]>();
+    const chainMap = new Map<string, { id: string; type: ReasoningType; title: string; content: string; tags: string[]; quality: number; createdAt: string }[]>();
     for (const c of chainResult.rows) {
       if (!chainMap.has(c.session_id)) chainMap.set(c.session_id, []);
       chainMap.get(c.session_id)!.push({
+        id: c.id,
         type: c.type as ReasoningType,
         title: c.title,
         content: c.content,
+        tags: c.tags ?? [],
+        quality: c.quality,
+        createdAt: c.created_at,
       });
     }
 
@@ -480,6 +501,7 @@ export class PGliteStorageProvider implements StorageProvider {
       tool: s.tool,
       project: s.project ?? undefined,
       startedAt: s.started_at,
+      endedAt: s.ended_at ?? undefined,
       summary: s.summary ?? undefined,
       reasoningChains: chainMap.get(s.id) ?? [],
     }));

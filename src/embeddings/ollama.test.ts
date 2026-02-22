@@ -29,6 +29,11 @@ function fakeVector(marker = 1.0): number[] {
 
 const originalFetch = globalThis.fetch;
 
+/** Assign a mock to globalThis.fetch. Cast handles Bun's extended fetch type (includes `preconnect`). */
+const setFetch = (fn: (...args: any[]) => Promise<Response | never>): void => {
+  globalThis.fetch = fn as typeof fetch;
+};
+
 /**
  * OllamaEmbeddingProvider reads from config.ollama.baseUrl and config.ollama.embeddingModel
  * via getters. We need those to resolve without hitting real env. Since the provider uses
@@ -60,7 +65,7 @@ describe("OllamaEmbeddingProvider", () => {
   describe("generateEmbedding", () => {
     test("returns embedding vector from Ollama response", async () => {
       const vec = fakeVector(0.42);
-      globalThis.fetch = async () => embedResponse([vec]);
+      setFetch(async () => embedResponse([vec]));
       const result = await provider.generateEmbedding("test text");
       expect(result).toEqual(vec);
       expect(result).toHaveLength(1024);
@@ -79,7 +84,7 @@ describe("OllamaEmbeddingProvider", () => {
     });
 
     test("throws when Ollama returns empty embeddings array", async () => {
-      globalThis.fetch = async () => embedResponse([]);
+      setFetch(async () => embedResponse([]));
       await expect(provider.generateEmbedding("test")).rejects.toThrow(
         /empty embeddings array/,
       );
@@ -96,7 +101,7 @@ describe("OllamaEmbeddingProvider", () => {
 
     test("returns multiple embedding vectors", async () => {
       const vecs = [fakeVector(1.0), fakeVector(2.0), fakeVector(3.0)];
-      globalThis.fetch = async () => embedResponse(vecs);
+      setFetch(async () => embedResponse(vecs));
       const result = await provider.generateEmbeddings(["a", "b", "c"]);
       expect(result).toHaveLength(3);
       expect(result[0]![0]).toBe(1.0);
@@ -117,7 +122,7 @@ describe("OllamaEmbeddingProvider", () => {
 
     test("throws on count mismatch between inputs and outputs", async () => {
       // Send 3 texts but only get 2 embeddings back
-      globalThis.fetch = async () => embedResponse([fakeVector(), fakeVector()]);
+      setFetch(async () => embedResponse([fakeVector(), fakeVector()]));
       await expect(
         provider.generateEmbeddings(["a", "b", "c"]),
       ).rejects.toThrow(/2 embeddings for 3 inputs/);
@@ -125,10 +130,10 @@ describe("OllamaEmbeddingProvider", () => {
 
     test("sends all texts in a single request (batch API)", async () => {
       let capturedBody: Record<string, unknown> = {};
-      globalThis.fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+      setFetch(async (_url: string | URL | Request, init?: RequestInit) => {
         capturedBody = JSON.parse(init?.body as string);
         return embedResponse([fakeVector(), fakeVector()]);
-      };
+      });
       await provider.generateEmbeddings(["text1", "text2"]);
       // Should send array input, not individual requests
       expect(capturedBody.input).toEqual(["text1", "text2"]);
@@ -140,33 +145,33 @@ describe("OllamaEmbeddingProvider", () => {
 
   describe("error handling", () => {
     test("throws timeout error with clear message", async () => {
-      globalThis.fetch = async () => {
+      setFetch(async () => {
         throw new DOMException("The operation was aborted", "TimeoutError");
-      };
+      });
       await expect(provider.generateEmbedding("test")).rejects.toThrow(
         /timed out after 30s/,
       );
     });
 
     test("throws 'not running' on network failure", async () => {
-      globalThis.fetch = async () => {
+      setFetch(async () => {
         throw new Error("ECONNREFUSED");
-      };
+      });
       await expect(provider.generateEmbedding("test")).rejects.toThrow(
         /Ollama is not running/,
       );
     });
 
     test("throws 'model not found' on 404 response", async () => {
-      globalThis.fetch = async () => errorResponse("model not found", 404);
+      setFetch(async () => errorResponse("model not found", 404));
       await expect(provider.generateEmbedding("test")).rejects.toThrow(
         /not found.*Pull it/,
       );
     });
 
     test("throws generic API error on 500", async () => {
-      globalThis.fetch = async () =>
-        errorResponse("internal server error", 500);
+      setFetch(async () =>
+        errorResponse("internal server error", 500));
       await expect(provider.generateEmbedding("test")).rejects.toThrow(
         /Ollama API error \(500\)/,
       );
@@ -176,9 +181,9 @@ describe("OllamaEmbeddingProvider", () => {
       // With 5 items, timeout should be 5 * 30s = 150s
       // With 15 items, timeout should be capped at 10 * 30s = 300s
       // We verify by checking the error message includes the scaled timeout
-      globalThis.fetch = async () => {
+      setFetch(async () => {
         throw new DOMException("The operation was aborted", "TimeoutError");
-      };
+      });
       // 5 items → 150s
       await expect(
         provider.generateEmbeddings(["a", "b", "c", "d", "e"]),
@@ -186,9 +191,9 @@ describe("OllamaEmbeddingProvider", () => {
     });
 
     test("batch timeout caps at 10x base for large batches", async () => {
-      globalThis.fetch = async () => {
+      setFetch(async () => {
         throw new DOMException("The operation was aborted", "TimeoutError");
-      };
+      });
       // 20 items → should cap at 10 * 30s = 300s
       const texts = Array.from({ length: 20 }, (_, i) => `text-${i}`);
       await expect(provider.generateEmbeddings(texts)).rejects.toThrow(

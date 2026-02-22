@@ -181,7 +181,7 @@ server.registerTool(
         (r, i) =>
           `## ${i + 1}. [${r.type.toUpperCase()}] ${r.title}\n` +
           `ID: ${r.id}\n` +
-          `Similarity: ${(r.similarity * 100).toFixed(1)}%\n` +
+          `Similarity: ${(r.similarity * 100).toFixed(1)}% | Quality: ${(r.quality * 100).toFixed(0)}%\n` +
           `${r.content}\n` +
           (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
           `Date: ${r.createdAt}`

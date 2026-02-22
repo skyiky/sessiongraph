@@ -26,5 +26,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["supabase/functions/**/*"]
+  "exclude": ["supabase/functions/**/*", "web/**/*", "scripts/**/*"]
 }

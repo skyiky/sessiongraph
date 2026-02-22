@@ -5,6 +5,10 @@ import { getStorageProvider, getEmbeddingProvider, resetProviders } from "./stor
 import { runInit } from "./cli/init.ts";
 import { runBackfill, requestBackfillStop } from "./backfill/backfill.ts";
 import { runLinker } from "./backfill/linker.ts";
+import {
+  bold, dim, cyan, green, yellow, red,
+  typeBadge, colorPct, formatTags, separator, shortDate,
+} from "./cli/format.ts";
 
 import { createInterface } from "node:readline";
 
@@ -241,13 +245,15 @@ program
     }
 
     console.log(`Found ${results.length} results:\n`);
-    for (const r of results) {
-      console.log(`[${r.type.toUpperCase()}] ${r.title}`);
-      console.log(`  Similarity: ${(r.similarity * 100).toFixed(1)}%`);
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]!;
+      console.log(`${typeBadge(r.type)} ${bold(r.title)}`);
+      console.log(`  ${colorPct(r.similarity, "Similarity")} ${dim("|")} ${colorPct(r.quality, "Quality")}`);
       console.log(`  ${r.content}`);
-      if (r.tags.length > 0) console.log(`  Tags: ${r.tags.join(", ")}`);
-      console.log(`  Date: ${r.createdAt}`);
-      console.log();
+      const tags = formatTags(r.tags);
+      if (tags) console.log(`  ${tags}`);
+      console.log(`  ${shortDate(r.createdAt)}`);
+      if (i < results.length - 1) console.log(separator());
     }
 
     await resetProviders();
@@ -279,10 +285,11 @@ program
       return;
     }
 
-    console.log(`Sessions (${sessions.length}):\n`);
+    console.log(bold(`Sessions (${sessions.length}):\n`));
     for (const s of sessions) {
-      console.log(`${s.startedAt} | ${s.tool} | ${s.project ?? "no project"} | ${s.chainCount} chains`);
-      if (s.summary) console.log(`  ${s.summary}`);
+      const chains = s.chainCount > 0 ? green(`${s.chainCount} chains`) : dim("0 chains");
+      console.log(`  ${cyan(s.tool)} ${dim("|")} ${s.project ?? dim("no project")} ${dim("|")} ${chains} ${dim("|")} ${shortDate(s.startedAt)}`);
+      if (s.summary) console.log(`    ${dim(s.summary)}`);
     }
 
     await resetProviders();
@@ -462,6 +469,205 @@ program
     if (result.errors.length > 0) {
       console.log(`  ${result.errors.length} error(s):`);
       for (const err of result.errors.slice(0, 5)) console.log(`    - ${err}`);
+    }
+
+    await resetProviders();
+  });
+
+// ---- Stats ----
+
+program
+  .command("stats")
+  .description("Show reasoning chain statistics")
+  .action(async () => {
+    const userId = await resolveUserId();
+    const storage = await getStorageProvider();
+
+    const sessions = await storage.listSessions({ userId, limit: 10000 });
+    const timeline = await storage.getTimeline({ userId, limit: 10000 });
+
+    // Aggregate chains across all timeline entries
+    const allChains = timeline.flatMap((e) => e.reasoningChains);
+    const totalChains = allChains.length;
+    const totalSessions = sessions.length;
+
+    // Chains by type
+    const byType: Record<string, number> = {};
+    for (const c of allChains) {
+      byType[c.type] = (byType[c.type] ?? 0) + 1;
+    }
+
+    // Sessions by tool
+    const byTool: Record<string, number> = {};
+    for (const s of sessions) {
+      byTool[s.tool] = (byTool[s.tool] ?? 0) + 1;
+    }
+
+    // Sessions by project
+    const byProject: Record<string, number> = {};
+    for (const s of sessions) {
+      const proj = s.project ?? "(no project)";
+      byProject[proj] = (byProject[proj] ?? 0) + 1;
+    }
+
+    // Storage size (local mode only)
+    let storageSize = "";
+    if (config.storage.mode === "local") {
+      try {
+        const { statSync, readdirSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const pgliteDir = config.paths.pgliteDir;
+        let totalBytes = 0;
+
+        const walk = (dir: string) => {
+          try {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const fullPath = join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walk(fullPath);
+              } else {
+                totalBytes += statSync(fullPath).size;
+              }
+            }
+          } catch {
+            // skip inaccessible dirs
+          }
+        };
+
+        walk(pgliteDir);
+
+        if (totalBytes < 1024) storageSize = `${totalBytes} B`;
+        else if (totalBytes < 1024 * 1024) storageSize = `${(totalBytes / 1024).toFixed(1)} KB`;
+        else storageSize = `${(totalBytes / (1024 * 1024)).toFixed(1)} MB`;
+      } catch {
+        storageSize = "unknown";
+      }
+    }
+
+    // Output
+    console.log(bold("\nSessionGraph Statistics\n"));
+    console.log(`  ${bold("Total sessions:")}  ${cyan(String(totalSessions))}`);
+    console.log(`  ${bold("Total chains:")}    ${cyan(String(totalChains))}`);
+    if (storageSize) {
+      console.log(`  ${bold("Storage size:")}    ${cyan(storageSize)}`);
+    }
+    console.log(`  ${bold("Storage mode:")}    ${config.storage.mode}`);
+
+    if (Object.keys(byType).length > 0) {
+      console.log(bold("\n  Chains by type:"));
+      // Sort by count descending
+      const sorted = Object.entries(byType).sort((a, b) => b[1] - a[1]);
+      for (const [type, count] of sorted) {
+        console.log(`    ${typeBadge(type)} ${count}`);
+      }
+    }
+
+    if (Object.keys(byTool).length > 0) {
+      console.log(bold("\n  Sessions by tool:"));
+      const sorted = Object.entries(byTool).sort((a, b) => b[1] - a[1]);
+      for (const [tool, count] of sorted) {
+        console.log(`    ${cyan(tool)} ${count}`);
+      }
+    }
+
+    if (Object.keys(byProject).length > 0) {
+      console.log(bold("\n  Sessions by project:"));
+      const sorted = Object.entries(byProject).sort((a, b) => b[1] - a[1]);
+      for (const [project, count] of sorted) {
+        console.log(`    ${green(project)} ${count}`);
+      }
+    }
+
+    console.log();
+    await resetProviders();
+  });
+
+// ---- Export ----
+
+program
+  .command("export")
+  .description("Export reasoning chains to JSON or Markdown")
+  .option("-f, --format <format>", "Output format: json or markdown", "json")
+  .option("-o, --output <file>", "Output file (default: stdout)")
+  .option("-p, --project <project>", "Filter by project")
+  .action(async (opts) => {
+    const validFormats = ["json", "markdown"] as const;
+    if (!validFormats.includes(opts.format)) {
+      console.error(`Error: --format must be one of: ${validFormats.join(", ")}. Got '${opts.format}'`);
+      process.exit(1);
+    }
+
+    const userId = await resolveUserId();
+    const storage = await getStorageProvider();
+
+    const timeline = await storage.getTimeline({
+      userId,
+      project: opts.project,
+      limit: 10000,
+    });
+
+    let output: string;
+
+    if (opts.format === "json") {
+      // Structured JSON export
+      const data = timeline.map((entry) => ({
+        session: {
+          id: entry.sessionId,
+          tool: entry.tool,
+          project: entry.project ?? null,
+          startedAt: entry.startedAt,
+          endedAt: entry.endedAt ?? null,
+          summary: entry.summary ?? null,
+        },
+        chains: entry.reasoningChains.map((c) => ({
+          id: c.id,
+          type: c.type,
+          title: c.title,
+          content: c.content,
+          tags: c.tags,
+          quality: c.quality,
+          createdAt: c.createdAt,
+        })),
+      }));
+      output = JSON.stringify(data, null, 2);
+    } else {
+      // Markdown export
+      const lines: string[] = [];
+      lines.push("# SessionGraph Export\n");
+      lines.push(`Exported: ${new Date().toISOString()}`);
+      if (opts.project) lines.push(`Project: ${opts.project}`);
+      lines.push(`Sessions: ${timeline.length}`);
+      const totalChains = timeline.reduce((sum, e) => sum + e.reasoningChains.length, 0);
+      lines.push(`Chains: ${totalChains}\n`);
+      lines.push("---\n");
+
+      for (const entry of timeline) {
+        lines.push(`## ${entry.tool} — ${entry.project ?? "no project"}`);
+        lines.push(`**Started:** ${entry.startedAt}`);
+        if (entry.endedAt) lines.push(`**Ended:** ${entry.endedAt}`);
+        if (entry.summary) lines.push(`**Summary:** ${entry.summary}`);
+        lines.push("");
+
+        for (const c of entry.reasoningChains) {
+          lines.push(`### [${c.type.toUpperCase()}] ${c.title}\n`);
+          lines.push(c.content);
+          lines.push("");
+          if (c.tags.length > 0) lines.push(`*Tags: ${c.tags.join(", ")}*`);
+          lines.push(`*Quality: ${((c.quality ?? 1.0) * 100).toFixed(0)}%*\n`);
+        }
+
+        lines.push("---\n");
+      }
+
+      output = lines.join("\n");
+    }
+
+    if (opts.output) {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(opts.output, output, "utf-8");
+      console.log(`Exported ${timeline.length} sessions to ${opts.output}`);
+    } else {
+      process.stdout.write(output);
     }
 
     await resetProviders();

@@ -151,6 +151,7 @@ export class SupabaseStorageProvider implements StorageProvider {
         context: chain.context,
         tags: chain.tags,
         embedding: chain.embedding,
+        quality: chain.quality ?? 1.0,
       })
       .select("id")
       .single();
@@ -174,6 +175,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           context: chain.context,
           tags: chain.tags,
           embedding: chain.embedding,
+          quality: chain.quality ?? 1.0,
         }))
       )
       .select("id");
@@ -203,12 +205,13 @@ export class SupabaseStorageProvider implements StorageProvider {
       context: r.context,
       tags: r.tags,
       similarity: r.similarity,
+      quality: r.quality ?? 1.0,
       createdAt: r.created_at,
     }));
 
     // Client-side type filter (RPC doesn't support type filtering natively)
     if (opts.type) {
-      results = results.filter((r) => r.type === opts.type);
+      results = results.filter((r: { type: ReasoningType }) => r.type === opts.type);
     }
 
     return results;
@@ -220,7 +223,7 @@ export class SupabaseStorageProvider implements StorageProvider {
     const sb = this.getClient();
     let sessionQuery = sb
       .from("sessions")
-      .select("id, tool, project, started_at, summary")
+      .select("id, tool, project, started_at, ended_at, summary")
       .eq("user_id", opts.userId)
       .order("started_at", { ascending: false })
       .limit(opts.limit ?? 10);
@@ -235,16 +238,24 @@ export class SupabaseStorageProvider implements StorageProvider {
     const sessionIds = sessions.map((s: any) => s.id);
     const { data: chains, error: chainError } = await sb
       .from("reasoning_chains")
-      .select("session_id, type, title, content")
+      .select("id, session_id, type, title, content, tags, quality, created_at")
       .in("session_id", sessionIds)
       .order("created_at", { ascending: true });
 
     if (chainError) throw new Error(`Failed to get timeline chains: ${chainError.message}`);
 
-    const chainMap = new Map<string, { type: ReasoningType; title: string; content: string }[]>();
+    const chainMap = new Map<string, { id: string; type: ReasoningType; title: string; content: string; tags: string[]; quality: number; createdAt: string }[]>();
     for (const c of (chains ?? []) as any[]) {
       if (!chainMap.has(c.session_id)) chainMap.set(c.session_id, []);
-      chainMap.get(c.session_id)!.push({ type: c.type as ReasoningType, title: c.title, content: c.content });
+      chainMap.get(c.session_id)!.push({
+        id: c.id,
+        type: c.type as ReasoningType,
+        title: c.title,
+        content: c.content,
+        tags: c.tags ?? [],
+        quality: c.quality ?? 1.0,
+        createdAt: c.created_at,
+      });
     }
 
     return sessions.map((s: any) => ({
@@ -252,6 +263,7 @@ export class SupabaseStorageProvider implements StorageProvider {
       tool: s.tool,
       project: s.project,
       startedAt: s.started_at,
+      endedAt: s.ended_at,
       summary: s.summary,
       reasoningChains: chainMap.get(s.id) ?? [],
     }));

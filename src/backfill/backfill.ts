@@ -410,6 +410,7 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
             content: chain.content,
             tags: chain.tags,
             embedding,
+            quality: 0.6, // Ollama backfill — good but not agent-authored
           };
         });
 

@@ -60,6 +60,7 @@ export interface ReasoningChain {
   context?: string;
   tags: string[];
   embedding?: number[];
+  quality?: number; // 0-1, defaults to 1.0. Real-time capture = 1.0, Ollama backfill = 0.6
   createdAt?: Date;
 }
 
@@ -126,6 +127,7 @@ export interface RecallResult {
   context?: string;
   tags: string[];
   similarity: number;
+  quality: number; // 0-1 quality score
   createdAt: string;
 }
 
@@ -134,11 +136,16 @@ export interface TimelineEntry {
   tool: string;
   project?: string;
   startedAt: string;
+  endedAt?: string;
   summary?: string;
   reasoningChains: {
+    id: string;
     type: ReasoningType;
     title: string;
     content: string;
+    tags: string[];
+    quality: number;
+    createdAt: string;
   }[];
 }
 
