@@ -66,13 +66,16 @@ src/
 │   ├── sync.ts           # Local → cloud sync
 │   └── buffer.ts         # Offline write buffer (SQLite, retry with backoff)
 ├── capture/              # Real-time capture utilities
-└── cli/                  # CLI subcommands (init wizard, detect tools)
+└── cli/
+    ├── init.ts           # Interactive setup wizard
+    ├── detect.ts         # AI tool detection
+    └── format.ts         # Terminal color/formatting utilities (ANSI, TTY-aware)
 
 skills/
 ├── auto-reasoning-capture/SKILL.md  # Skill for AI agents to capture reasoning in real-time
 └── backfill/SKILL.md               # Skill for agent-driven backfill
 
-web/                      # Separate Next.js dashboard app (has its own tsconfig)
+web/                      # Separate Next.js dashboard app (has its own tsconfig, cloud-only)
 docs/
 ```
 
@@ -90,6 +93,8 @@ docs/
 
 **Removed legacy extractors:** `extractReasoningChains()` (LLM-based, required OpenAI key) and `extractReasoningChainsSimple()` (regex-based) both produced mediocre output. Deleted in favor of real-time capture + Ollama backfill.
 
+**Quality scoring:** Not all chains are equal. Each chain has a `quality` field (0-1, REAL DEFAULT 1.0). Real-time MCP capture = 1.0, Ollama backfill = 0.6. Search ranking uses a blended score: `similarity * (0.7 + 0.3 * quality)` — semantic relevance dominates, but higher-quality chains win at equal similarity. The threshold filter uses raw cosine similarity (quality doesn't exclude relevant chains).
+
 ## Conventions
 
 - **Error handling:** `catch (err: unknown)` not `catch (err: any)`. Use `err instanceof Error ? err.message : String(err)`.
@@ -103,14 +108,11 @@ docs/
 ## Testing
 
 ```bash
-# Run all tests (117 tests)
+# Run all tests (122 tests)
 bun test src/backfill/ollama-extractor.test.ts src/config/config.test.ts src/embeddings/ollama.test.ts src/storage/pglite.test.ts src/ingestion/parsers/claude-code.test.ts
 ```
 
-Known pre-existing TS issues (not bugs, tests pass):
-- `preconnect` property errors on `fetch` mocks in test files — Bun `@types` version mismatch
-- `web/` directory has module resolution errors — separate Next.js app with its own tsconfig
-- `src/storage/supabase-provider.ts:211` has implicit `any` on a filter callback
+All TS errors resolved — `bunx tsc --noEmit` passes clean.
 
 ## CLI Commands
 
@@ -118,6 +120,8 @@ Known pre-existing TS issues (not bugs, tests pass):
 sessiongraph init             # interactive setup (one time)
 sessiongraph search "query"   # semantic search over reasoning history
 sessiongraph sessions         # list recent sessions
+sessiongraph stats            # chain count by type, sessions by tool, storage size
+sessiongraph export           # dump reasoning chains to JSON or Markdown
 sessiongraph backfill         # extract reasoning from past sessions via Ollama
 sessiongraph link             # auto-link related chains via embedding similarity
 sessiongraph login            # authenticate for cloud sync

@@ -108,6 +108,8 @@ Relations are created automatically via `sessiongraph link` or manually when cal
 sessiongraph init             # interactive setup (one time)
 sessiongraph search "query"   # search your reasoning history
 sessiongraph sessions         # list recent sessions
+sessiongraph stats            # chain count by type, sessions by tool, storage size
+sessiongraph export           # export chains to JSON or Markdown
 sessiongraph backfill         # extract reasoning from past sessions
 sessiongraph link             # auto-link related chains via embeddings
 sessiongraph login            # authenticate for cloud sync
