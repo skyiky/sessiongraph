@@ -374,7 +374,11 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
 
         // ---- Step 3: Embed chains (embedding model) ----
         emitStep(i, entry, "embedding", `${chains.length} chains`);
-        const texts = chains.map((c) => `${c.title}\n${c.content}`);
+        const texts = chains.map((c) => {
+          const parts = [c.title, c.content];
+          if (c.tags.length > 0) parts.push(c.tags.join(", "));
+          return parts.join("\n");
+        });
         const chainEmbeddings: number[][] = [];
         for (let bi = 0; bi < texts.length; bi += EMBED_BATCH_SIZE) {
           const batch = texts.slice(bi, bi + EMBED_BATCH_SIZE);
@@ -411,6 +415,7 @@ export async function runBackfill(opts?: BackfillOptions): Promise<BackfillResul
             tags: chain.tags,
             embedding,
             quality: 0.6, // Ollama backfill — good but not agent-authored
+            source: "backfill" as const,
           };
         });
 

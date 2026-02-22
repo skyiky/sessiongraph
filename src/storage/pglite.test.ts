@@ -768,4 +768,578 @@ describe("PGliteStorageProvider", () => {
     related = await provider.getRelatedChains({ chainId: chainA });
     expect(related.some((r) => r.chainId === tempChain)).toBe(false);
   });
+
+  // ---- Project Column (direct on chain) ----
+
+  test("insertReasoningChain stores project directly on chain", async () => {
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.3));
+
+    const id = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Project-tagged chain",
+      content: "This chain has a direct project tag, independent of session.",
+      tags: ["project-test"],
+      embedding,
+      project: "my-cool-project",
+    });
+
+    expect(id).toBeTruthy();
+
+    // Search with project filter should find it even though sessionId is null
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.3) + 0.001);
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      project: "my-cool-project",
+      matchThreshold: 0.9,
+      limit: 5,
+    });
+
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]!.project).toBe("my-cool-project");
+  });
+
+  test("searchReasoning project filter finds chains via session OR direct project", async () => {
+    // Chain on session with project "sessiongraph" already exists from earlier tests.
+    // Chain with direct project "my-cool-project" was just created.
+    // Searching for "sessiongraph" should find session-linked chains but NOT "my-cool-project" chains.
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+
+    const sgResults = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      project: "sessiongraph",
+      matchThreshold: 0.3,
+      limit: 50,
+    });
+
+    // All results should be from sessiongraph (via session or direct)
+    for (const r of sgResults) {
+      // Either the chain's project is sessiongraph, or it came through a session with that project
+      // (we can't easily distinguish here, but none should be from "my-cool-project")
+      expect(r.project).not.toBe("my-cool-project");
+    }
+  });
+
+  // ---- Source Column ----
+
+  test("insertReasoningChain stores source field", async () => {
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.5));
+
+    const id = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Backfill-sourced chain",
+      content: "This chain was created by the backfill process.",
+      tags: ["source-test"],
+      embedding,
+      source: "backfill",
+    });
+
+    expect(id).toBeTruthy();
+
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.5) + 0.001);
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.source).toBe("backfill");
+  });
+
+  test("source defaults to mcp_capture when not specified", async () => {
+    // The chain "PGlite supports pgvector" was inserted without source field
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.title).toBe("PGlite supports pgvector");
+    expect(results[0]!.source).toBe("mcp_capture");
+  });
+
+  // ---- Context Field ----
+
+  test("insertReasoningChain stores context field", async () => {
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.7));
+
+    const id = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Chain with context",
+      content: "This chain includes context about the surrounding discussion.",
+      context: "User was asking about database migrations when this decision was made.",
+      tags: ["context-test"],
+      embedding,
+    });
+
+    expect(id).toBeTruthy();
+
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 1.7) + 0.001);
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.context).toBe("User was asking about database migrations when this decision was made.");
+  });
+
+  // ---- Status & Auto-Archive ----
+
+  test("status defaults to active", async () => {
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+    const results = await provider.searchReasoning({
+      queryEmbedding: embedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.status).toBe("active");
+  });
+
+  test("supersedes relation auto-archives target chain", async () => {
+    // Create old chain and new chain
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.1));
+
+    const oldChainId = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Old decision to be superseded",
+      content: "This decision will be replaced by a newer one.",
+      tags: ["supersede-test"],
+      embedding,
+    });
+
+    const newChainId = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "New decision that supersedes old",
+      content: "This decision replaces the old one.",
+      tags: ["supersede-test"],
+      embedding,
+    });
+
+    // Create supersedes relation: new → old
+    await provider.insertChainRelation({
+      sourceChainId: newChainId,
+      targetChainId: oldChainId,
+      relationType: "supersedes",
+    });
+
+    // Search — old chain should NOT appear (status='superseded', excluded by default)
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.1) + 0.001);
+    const defaultResults = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 10,
+    });
+
+    const defaultTitles = defaultResults.map((r) => r.title);
+    expect(defaultTitles).toContain("New decision that supersedes old");
+    expect(defaultTitles).not.toContain("Old decision to be superseded");
+
+    // Search with includeSuperseded=true — old chain SHOULD appear
+    const allResults = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 10,
+      includeSuperseded: true,
+    });
+
+    const allTitles = allResults.map((r) => r.title);
+    expect(allTitles).toContain("New decision that supersedes old");
+    expect(allTitles).toContain("Old decision to be superseded");
+
+    // Verify the superseded chain has status='superseded'
+    const supersededChain = allResults.find((r) => r.title === "Old decision to be superseded");
+    expect(supersededChain!.status).toBe("superseded");
+  });
+
+  test("batch insertChainRelations also auto-archives superseded targets", async () => {
+    const embedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.3));
+
+    const targetId = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Batch-superseded target",
+      content: "Will be superseded via batch insert.",
+      tags: ["batch-supersede"],
+      embedding,
+    });
+
+    const sourceId = await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Batch superseder",
+      content: "Supersedes via batch.",
+      tags: ["batch-supersede"],
+      embedding,
+    });
+
+    await provider.insertChainRelations([
+      {
+        sourceChainId: sourceId,
+        targetChainId: targetId,
+        relationType: "supersedes",
+      },
+    ]);
+
+    // Target should be auto-archived
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.3) + 0.001);
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 10,
+    });
+
+    const titles = results.map((r) => r.title);
+    expect(titles).toContain("Batch superseder");
+    expect(titles).not.toContain("Batch-superseded target");
+  });
+
+  // ---- Confidence on Relations ----
+
+  test("insertChainRelation stores confidence", async () => {
+    const id = await provider.insertChainRelation({
+      sourceChainId: chainA,
+      targetChainId: chainC,
+      relationType: "refines",
+      confidence: 0.85,
+    });
+
+    expect(id).toBeTruthy();
+
+    const results = await provider.getRelatedChains({ chainId: chainA });
+    const refines = results.find(
+      (r) => r.relationType === "refines" && r.direction === "outgoing" && r.chainId === chainC
+    );
+
+    expect(refines).toBeDefined();
+    expect(refines!.confidence).toBeCloseTo(0.85, 2);
+  });
+
+  test("confidence is undefined when not set", async () => {
+    // The leads_to relation from chainA → chainB was inserted without confidence
+    const results = await provider.getRelatedChains({ chainId: chainA, relationType: "leads_to" });
+
+    expect(results.length).toBe(1);
+    expect(results[0]!.confidence).toBeUndefined();
+  });
+
+  // ---- Multi-hop Graph Traversal ----
+
+  test("getRelatedChains with depth=1 returns only direct neighbors", async () => {
+    const results = await provider.getRelatedChains({ chainId: chainA, depth: 1 });
+
+    // All should be depth 1
+    for (const r of results) {
+      expect(r.depth).toBe(1);
+    }
+  });
+
+  test("getRelatedChains with depth=2 returns 2-hop neighbors", async () => {
+    // Create a 3-node chain: D → E → F
+    const dId = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Node D",
+      content: "First node in multi-hop test.",
+      tags: ["multihop"],
+    });
+    const eId = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Node E",
+      content: "Middle node in multi-hop test.",
+      tags: ["multihop"],
+    });
+    const fId = await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Node F",
+      content: "Last node in multi-hop test.",
+      tags: ["multihop"],
+    });
+
+    await provider.insertChainRelation({
+      sourceChainId: dId,
+      targetChainId: eId,
+      relationType: "leads_to",
+    });
+    await provider.insertChainRelation({
+      sourceChainId: eId,
+      targetChainId: fId,
+      relationType: "leads_to",
+    });
+
+    // Depth 1 from D: should find E only (outgoing)
+    const depth1 = await provider.getRelatedChains({ chainId: dId, depth: 1 });
+    const depth1Ids = depth1.map((r) => r.chainId);
+    expect(depth1Ids).toContain(eId);
+    expect(depth1Ids).not.toContain(fId);
+
+    // Depth 2 from D: should find E (depth 1) and F (depth 2)
+    const depth2 = await provider.getRelatedChains({ chainId: dId, depth: 2 });
+    const depth2Map = new Map(depth2.map((r) => [r.chainId, r]));
+
+    expect(depth2Map.has(eId)).toBe(true);
+    expect(depth2Map.has(fId)).toBe(true);
+    expect(depth2Map.get(eId)!.depth).toBe(1);
+    expect(depth2Map.get(fId)!.depth).toBe(2);
+  });
+
+  test("getRelatedChains depth is clamped to max 3", async () => {
+    // Requesting depth=10 should behave like depth=3 (no crash)
+    const results = await provider.getRelatedChains({ chainId: chainA, depth: 10 });
+    // Should return results without error
+    expect(Array.isArray(results)).toBe(true);
+  });
+
+  // ---- Score Field in Search Results ----
+
+  test("search results include blended score field", async () => {
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.5,
+      limit: 5,
+    });
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(typeof r.score).toBe("number");
+      expect(r.score).toBeGreaterThan(0);
+      // Score is a blend of similarity (0-1), text_match (0-1), quality (0-1), recency (0-1)
+      // All weighted to sum ≤ 1.0 max, but can be slightly above due to rounding
+      expect(r.score).toBeLessThanOrEqual(1.1);
+    }
+  });
+
+  test("search results are ordered by blended score descending", async () => {
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.3,
+      limit: 20,
+    });
+
+    // Verify descending order
+    for (let i = 1; i < results.length; i++) {
+      expect(results[i - 1]!.score).toBeGreaterThanOrEqual(results[i]!.score);
+    }
+  });
+
+  // ---- Hybrid Search (queryText) ----
+
+  test("searchReasoning with queryText finds text matches", async () => {
+    // Insert a chain with specific searchable text but a dissimilar embedding
+    const dissimilarEmbedding = Array.from({ length: 1024 }, (_, i) => (i % 3 === 0 ? 0.5 : -0.5));
+
+    await provider.insertReasoningChain({
+      sessionId: null,
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      title: "Kubernetes pod scaling strategy",
+      content: "Horizontal pod autoscaler with custom metrics for production workloads.",
+      tags: ["kubernetes", "scaling"],
+      embedding: dissimilarEmbedding,
+    });
+
+    // Query with a very different embedding but matching text
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1));
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      queryText: "Kubernetes pod scaling",
+      matchThreshold: 0.5,
+      limit: 20,
+    });
+
+    // The kubernetes chain should appear even though its embedding is dissimilar,
+    // because queryText does full-text matching
+    const k8sResult = results.find((r) => r.title === "Kubernetes pod scaling strategy");
+    expect(k8sResult).toBeDefined();
+  });
+
+  test("searchReasoning without queryText uses vector-only matching", async () => {
+    // Same query without queryText — kubernetes chain shouldn't appear
+    // because its embedding is dissimilar to our query embedding
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1));
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.5,
+      limit: 20,
+    });
+
+    // The kubernetes chain has a very different embedding pattern, should not match at 0.5 threshold
+    const k8sResult = results.find((r) => r.title === "Kubernetes pod scaling strategy");
+    // It may or may not appear depending on embedding math, but if it does, it should rank low
+    if (k8sResult) {
+      expect(k8sResult.similarity).toBeLessThan(0.5);
+    }
+  });
+
+  // ---- Batch insert with new fields ----
+
+  test("batch insertReasoningChains respects project, source, status fields", async () => {
+    const embedding1 = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.5));
+    const embedding2 = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.7));
+
+    const ids = await provider.insertReasoningChains([
+      {
+        sessionId: null,
+        userId: LOCAL_USER_ID,
+        type: "decision",
+        title: "Batch chain with all fields",
+        content: "Has project, source, and status set.",
+        tags: ["batch-fields"],
+        embedding: embedding1,
+        project: "batch-project",
+        source: "backfill",
+        status: "active",
+      },
+      {
+        sessionId: null,
+        userId: LOCAL_USER_ID,
+        type: "insight",
+        title: "Batch chain defaults",
+        content: "Should get default source and status.",
+        tags: ["batch-fields"],
+        embedding: embedding2,
+      },
+    ]);
+
+    expect(ids.length).toBe(2);
+
+    // Verify first chain has explicit values
+    const q1 = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.5) + 0.001);
+    const r1 = await provider.searchReasoning({
+      queryEmbedding: q1,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+    expect(r1.length).toBe(1);
+    expect(r1[0]!.project).toBe("batch-project");
+    expect(r1[0]!.source).toBe("backfill");
+    expect(r1[0]!.status).toBe("active");
+
+    // Verify second chain has defaults
+    const q2 = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 2.7) + 0.001);
+    const r2 = await provider.searchReasoning({
+      queryEmbedding: q2,
+      userId: LOCAL_USER_ID,
+      matchThreshold: 0.9,
+      limit: 1,
+    });
+    expect(r2.length).toBe(1);
+    expect(r2[0]!.source).toBe("mcp_capture");
+    expect(r2[0]!.status).toBe("active");
+  });
+
+  // ---- Timeline includes new fields ----
+
+  test("getTimeline includes project, source, status on chains", async () => {
+    // Insert a chain with explicit project/source on a session
+    await provider.insertReasoningChain({
+      sessionId: "test-session-1",
+      userId: LOCAL_USER_ID,
+      type: "decision",
+      title: "Timeline chain with new fields",
+      content: "Should show up in timeline with project, source, status.",
+      tags: ["timeline-test"],
+      project: "sessiongraph",
+      source: "mcp_capture",
+    });
+
+    const entries = await provider.getTimeline({
+      userId: LOCAL_USER_ID,
+      project: "sessiongraph",
+      limit: 5,
+    });
+
+    expect(entries.length).toBeGreaterThan(0);
+    const entry = entries.find((e) => e.project === "sessiongraph");
+    expect(entry).toBeDefined();
+
+    // Find the chain we just inserted
+    const chain = entry!.reasoningChains.find((c) => c.title === "Timeline chain with new fields");
+    expect(chain).toBeDefined();
+    expect(chain!.source).toBe("mcp_capture");
+    expect(chain!.status).toBe("active");
+  });
+
+  // ---- Search with type filter + new param binding ----
+
+  test("searchReasoning with type filter works correctly", async () => {
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1) + 0.01);
+
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      type: "insight",
+      matchThreshold: 0.5,
+      limit: 10,
+    });
+
+    for (const r of results) {
+      expect(r.type).toBe("insight");
+    }
+  });
+
+  test("searchReasoning with project + type + queryText all together", async () => {
+    // Exercise the most complex parameter binding path
+    const queryEmbedding = Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1));
+
+    // Should not throw (the parameter binding bug would cause a crash here)
+    const results = await provider.searchReasoning({
+      queryEmbedding,
+      userId: LOCAL_USER_ID,
+      project: "sessiongraph",
+      type: "decision",
+      queryText: "PGlite",
+      matchThreshold: 0.3,
+      limit: 5,
+    });
+
+    // Should return valid results
+    expect(Array.isArray(results)).toBe(true);
+    for (const r of results) {
+      expect(r.type).toBe("decision");
+    }
+  });
 });

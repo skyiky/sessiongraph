@@ -22,6 +22,8 @@ import type {
   SessionChunk,
   SessionListEntry,
   TimelineEntry,
+  ChainSource,
+  ChainStatus,
 } from "../config/types.ts";
 
 /** Fixed user ID for local single-user mode. Keeps schema compatible with cloud sync. */
@@ -116,6 +118,9 @@ export class PGliteStorageProvider implements StorageProvider {
         tags TEXT[] DEFAULT '{}',
         embedding vector(1024),
         quality REAL DEFAULT 1.0,
+        project TEXT,
+        source TEXT DEFAULT 'mcp_capture',
+        status TEXT DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
@@ -143,6 +148,7 @@ export class PGliteStorageProvider implements StorageProvider {
           'leads_to', 'supersedes', 'contradicts', 'builds_on',
           'depends_on', 'refines', 'generalizes', 'analogous_to'
         )),
+        confidence REAL,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE(source_chain_id, target_chain_id, relation_type)
       );
@@ -182,6 +188,19 @@ export class PGliteStorageProvider implements StorageProvider {
     // Add quality column if it doesn't exist (v0.3 schema upgrade)
     await db.exec(`
       ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS quality REAL DEFAULT 1.0;
+    `);
+    // v0.4 schema upgrade: project, source, status on reasoning_chains; confidence on chain_relations
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS project TEXT;
+    `);
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'mcp_capture';
+    `);
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active';
+    `);
+    await db.exec(`
+      ALTER TABLE chain_relations ADD COLUMN IF NOT EXISTS confidence REAL;
     `);
   }
 
@@ -286,8 +305,8 @@ export class PGliteStorageProvider implements StorageProvider {
       : null;
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10, $11, $12)
        RETURNING id`,
       [
         chain.sessionId ?? null,
@@ -299,6 +318,9 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.tags,
         embeddingStr,
         chain.quality ?? 1.0,
+        chain.project ?? null,
+        chain.source ?? "mcp_capture",
+        chain.status ?? "active",
       ]
     );
 
@@ -309,7 +331,7 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chains.length === 0) return [];
     const db = await this.getDb();
 
-    // Build multi-row VALUES clause for a single INSERT (9 params per row)
+    // Build multi-row VALUES clause (12 params per row)
     const valueClauses: string[] = [];
     const params: any[] = [];
     let idx = 1;
@@ -320,7 +342,7 @@ export class PGliteStorageProvider implements StorageProvider {
         : null;
 
       valueClauses.push(
-        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector, $${idx++})`
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
       );
       params.push(
         chain.sessionId ?? null,
@@ -332,11 +354,14 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.tags,
         embeddingStr,
         chain.quality ?? 1.0,
+        chain.project ?? null,
+        chain.source ?? "mcp_capture",
+        chain.status ?? "active",
       );
     }
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status)
        VALUES ${valueClauses.join(", ")}
        RETURNING id`,
       params
@@ -349,25 +374,64 @@ export class PGliteStorageProvider implements StorageProvider {
     const db = await this.getDb();
     const threshold = opts.matchThreshold ?? 0.5;
     const limit = opts.limit ?? 10;
+    const includeSuperseded = opts.includeSuperseded ?? false;
 
     const embeddingStr = toVectorLiteral(opts.queryEmbedding);
 
-    // Build optional project filter
-    let projectFilter = "";
-    let typeFilter = "";
-    const params: any[] = [embeddingStr, threshold, limit];
-    let paramIdx = 4;
+    // Build dynamic WHERE conditions
+    const conditions: string[] = [
+      "rc.embedding IS NOT NULL",
+    ];
+    const params: any[] = [embeddingStr];
+    let paramIdx = 2;
 
+    // Status filter: exclude superseded by default
+    if (!includeSuperseded) {
+      conditions.push(`COALESCE(rc.status, 'active') = 'active'`);
+    }
+
+    // Direct project filter on reasoning_chains (no longer JOINs through sessions)
     if (opts.project) {
-      projectFilter = `AND rc.session_id IN (SELECT s.id FROM sessions s WHERE s.project = $${paramIdx++})`;
+      conditions.push(`(rc.project = $${paramIdx} OR rc.session_id IN (SELECT s.id FROM sessions s WHERE s.project = $${paramIdx}))`);
       params.push(opts.project);
+      paramIdx++;
     }
 
     if (opts.type) {
-      typeFilter = `AND rc.type = $${paramIdx++}`;
+      conditions.push(`rc.type = $${paramIdx}`);
       params.push(opts.type);
+      paramIdx++;
     }
 
+    // Hybrid search: vector similarity OR full-text match
+    // If queryText is provided, include text matches even if they're below vector threshold
+    const hasTextQuery = opts.queryText && opts.queryText.trim().length > 0;
+    let textMatchExpr = "0.0";
+    let matchCondition: string;
+
+    if (hasTextQuery) {
+      const textParamIdx = paramIdx++;
+      params.push(opts.queryText!.trim());
+      textMatchExpr = `CASE WHEN to_tsvector('english', rc.title || ' ' || rc.content || ' ' || COALESCE(array_to_string(rc.tags, ' '), '')) @@ plainto_tsquery('english', $${textParamIdx}) THEN 1.0 ELSE 0.0 END`;
+      // Match if vector similarity > threshold OR text matches
+      matchCondition = `(1 - (rc.embedding <=> $1::vector) > $${paramIdx} OR to_tsvector('english', rc.title || ' ' || rc.content || ' ' || COALESCE(array_to_string(rc.tags, ' '), '')) @@ plainto_tsquery('english', $${textParamIdx}))`;
+    } else {
+      matchCondition = `1 - (rc.embedding <=> $1::vector) > $${paramIdx}`;
+    }
+    params.push(threshold);
+    paramIdx++;
+
+    conditions.push(matchCondition);
+
+    // Limit param
+    params.push(limit);
+    const limitParamIdx = paramIdx++;
+
+    const whereClause = conditions.join("\n          AND ");
+
+    // Blended ranking formula:
+    //   score = vector_similarity * 0.55 + text_match * 0.15 + quality * 0.15 + recency * 0.15
+    // Recency decay: 1.0 / (1.0 + age_in_days * 0.0005) — gentle, ~15% penalty at 1 year
     const result = await db.query<{
       id: string;
       session_id: string | null;
@@ -377,7 +441,12 @@ export class PGliteStorageProvider implements StorageProvider {
       context: string | null;
       tags: string[];
       similarity: number;
+      text_match: number;
       quality: number;
+      score: number;
+      project: string | null;
+      source: string | null;
+      status: string | null;
       created_at: string;
     }>(
       `SELECT
@@ -389,15 +458,21 @@ export class PGliteStorageProvider implements StorageProvider {
          rc.context,
          rc.tags,
          1 - (rc.embedding <=> $1::vector) AS similarity,
+         ${textMatchExpr} AS text_match,
          COALESCE(rc.quality, 1.0) AS quality,
+         (1 - (rc.embedding <=> $1::vector)) * 0.55
+           + ${textMatchExpr} * 0.15
+           + COALESCE(rc.quality, 1.0) * 0.15
+           + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.0005)) * 0.15
+         AS score,
+         rc.project,
+         rc.source,
+         rc.status,
          rc.created_at
        FROM reasoning_chains rc
-       WHERE rc.embedding IS NOT NULL
-          AND 1 - (rc.embedding <=> $1::vector) > $2
-          ${projectFilter}
-          ${typeFilter}
-       ORDER BY (1 - (rc.embedding <=> $1::vector)) * (0.7 + 0.3 * COALESCE(rc.quality, 1.0)) DESC
-       LIMIT $3`,
+       WHERE ${whereClause}
+       ORDER BY score DESC
+       LIMIT $${limitParamIdx}`,
       params
     );
 
@@ -410,7 +485,11 @@ export class PGliteStorageProvider implements StorageProvider {
       context: r.context ?? undefined,
       tags: r.tags ?? [],
       similarity: r.similarity,
+      score: r.score,
       quality: r.quality,
+      project: r.project ?? undefined,
+      source: (r.source as ChainSource) ?? undefined,
+      status: (r.status as ChainStatus) ?? undefined,
       createdAt: r.created_at,
     }));
   }
@@ -472,9 +551,13 @@ export class PGliteStorageProvider implements StorageProvider {
       content: string;
       tags: string[];
       quality: number;
+      project: string | null;
+      source: string | null;
+      status: string | null;
       created_at: string;
     }>(
-      `SELECT id, session_id, type, title, content, tags, COALESCE(quality, 1.0) AS quality, created_at
+      `SELECT id, session_id, type, title, content, tags, COALESCE(quality, 1.0) AS quality,
+              project, source, status, created_at
        FROM reasoning_chains
        WHERE session_id IN (${placeholders})
        ORDER BY created_at ASC`,
@@ -482,7 +565,7 @@ export class PGliteStorageProvider implements StorageProvider {
     );
 
     // Group chains by session
-    const chainMap = new Map<string, { id: string; type: ReasoningType; title: string; content: string; tags: string[]; quality: number; createdAt: string }[]>();
+    const chainMap = new Map<string, { id: string; type: ReasoningType; title: string; content: string; tags: string[]; quality: number; project?: string; source?: ChainSource; status?: ChainStatus; createdAt: string }[]>();
     for (const c of chainResult.rows) {
       if (!chainMap.has(c.session_id)) chainMap.set(c.session_id, []);
       chainMap.get(c.session_id)!.push({
@@ -492,6 +575,9 @@ export class PGliteStorageProvider implements StorageProvider {
         content: c.content,
         tags: c.tags ?? [],
         quality: c.quality,
+        project: c.project ?? undefined,
+        source: (c.source as ChainSource) ?? undefined,
+        status: (c.status as ChainStatus) ?? undefined,
         createdAt: c.created_at,
       });
     }
@@ -536,13 +622,21 @@ export class PGliteStorageProvider implements StorageProvider {
     const db = await this.getDb();
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
-       VALUES ($1, $2, $3)
+      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type, confidence)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (source_chain_id, target_chain_id, relation_type)
-       DO UPDATE SET relation_type = EXCLUDED.relation_type
+       DO UPDATE SET relation_type = EXCLUDED.relation_type, confidence = COALESCE(EXCLUDED.confidence, chain_relations.confidence)
        RETURNING id`,
-      [relation.sourceChainId, relation.targetChainId, relation.relationType]
+      [relation.sourceChainId, relation.targetChainId, relation.relationType, relation.confidence ?? null]
     );
+
+    // Auto-archive: when a 'supersedes' relation is created, mark the target as superseded
+    if (relation.relationType === "supersedes") {
+      await db.query(
+        `UPDATE reasoning_chains SET status = 'superseded' WHERE id = $1 AND COALESCE(status, 'active') = 'active'`,
+        [relation.targetChainId]
+      );
+    }
 
     return result.rows[0]!.id;
   }
@@ -551,25 +645,38 @@ export class PGliteStorageProvider implements StorageProvider {
     if (relations.length === 0) return [];
     const db = await this.getDb();
 
-    // Build multi-row VALUES clause (3 params per row)
+    // Build multi-row VALUES clause (4 params per row)
     // Use DO UPDATE with no-op SET so RETURNING includes conflict rows too
     const valueClauses: string[] = [];
     const params: any[] = [];
     let idx = 1;
 
     for (const relation of relations) {
-      valueClauses.push(`($${idx++}, $${idx++}, $${idx++})`);
-      params.push(relation.sourceChainId, relation.targetChainId, relation.relationType);
+      valueClauses.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++})`);
+      params.push(relation.sourceChainId, relation.targetChainId, relation.relationType, relation.confidence ?? null);
     }
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type)
+      `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type, confidence)
        VALUES ${valueClauses.join(", ")}
        ON CONFLICT (source_chain_id, target_chain_id, relation_type)
-       DO UPDATE SET relation_type = EXCLUDED.relation_type
+       DO UPDATE SET relation_type = EXCLUDED.relation_type, confidence = COALESCE(EXCLUDED.confidence, chain_relations.confidence)
        RETURNING id`,
       params
     );
+
+    // Auto-archive: mark targets of 'supersedes' relations as superseded
+    const supersededTargets = relations
+      .filter((r) => r.relationType === "supersedes")
+      .map((r) => r.targetChainId);
+
+    if (supersededTargets.length > 0) {
+      const placeholders = supersededTargets.map((_, i) => `$${i + 1}`).join(",");
+      await db.query(
+        `UPDATE reasoning_chains SET status = 'superseded' WHERE id IN (${placeholders}) AND COALESCE(status, 'active') = 'active'`,
+        supersededTargets
+      );
+    }
 
     return result.rows.map((r) => r.id);
   }
@@ -577,21 +684,64 @@ export class PGliteStorageProvider implements StorageProvider {
   async getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]> {
     const db = await this.getDb();
     const limit = opts.limit ?? 20;
+    const depth = Math.min(Math.max(opts.depth ?? 1, 1), 3); // Clamp to 1-3
 
+    if (depth === 1) {
+      // Fast path: single-hop query (original behavior + confidence)
+      return this.getDirectRelatedChains(db, opts.chainId, opts.relationType, limit);
+    }
+
+    // Multi-hop BFS traversal
+    const visited = new Set<string>([opts.chainId]);
+    const allResults: RelatedChainResult[] = [];
+    let frontier = [opts.chainId];
+
+    for (let d = 0; d < depth && frontier.length > 0; d++) {
+      const nextFrontier: string[] = [];
+
+      for (const nodeId of frontier) {
+        const neighbors = await this.getDirectRelatedChains(db, nodeId, opts.relationType, limit);
+
+        for (const neighbor of neighbors) {
+          if (!visited.has(neighbor.chainId)) {
+            visited.add(neighbor.chainId);
+            allResults.push({ ...neighbor, depth: d + 1 });
+            nextFrontier.push(neighbor.chainId);
+          }
+        }
+      }
+
+      frontier = nextFrontier;
+    }
+
+    // Sort by depth, then by date, and apply limit
+    return allResults
+      .sort((a, b) => a.depth - b.depth || String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, limit);
+  }
+
+  /** Get direct (1-hop) related chains for a given chain ID. */
+  private async getDirectRelatedChains(
+    db: PGlite,
+    chainId: string,
+    relationType?: RelationType,
+    limit = 20,
+  ): Promise<RelatedChainResult[]> {
     // Query both directions: chains this one points to (outgoing) and chains pointing to this one (incoming)
     let typeFilter = "";
-    const params: any[] = [opts.chainId, limit];
+    const params: any[] = [chainId, limit];
     let paramIdx = 3;
 
-    if (opts.relationType) {
+    if (relationType) {
       typeFilter = `AND cr.relation_type = $${paramIdx++}`;
-      params.push(opts.relationType);
+      params.push(relationType);
     }
 
     const result = await db.query<{
       chain_id: string;
       relation_type: string;
       direction: string;
+      confidence: number | null;
       title: string;
       type: string;
       content: string;
@@ -602,6 +752,7 @@ export class PGliteStorageProvider implements StorageProvider {
          rc.id AS chain_id,
          cr.relation_type,
          'outgoing' AS direction,
+         cr.confidence,
          rc.title,
          rc.type,
          rc.content,
@@ -617,6 +768,7 @@ export class PGliteStorageProvider implements StorageProvider {
          rc.id AS chain_id,
          cr.relation_type,
          'incoming' AS direction,
+         cr.confidence,
          rc.title,
          rc.type,
          rc.content,
@@ -635,6 +787,8 @@ export class PGliteStorageProvider implements StorageProvider {
       chainId: r.chain_id,
       relationType: r.relation_type as RelationType,
       direction: r.direction as "outgoing" | "incoming",
+      confidence: r.confidence ?? undefined,
+      depth: 1,
       title: r.title,
       type: r.type as ReasoningType,
       content: r.content,

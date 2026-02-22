@@ -33,8 +33,9 @@ Do not call `sessiongraph_remember` for:
 - **title**: One specific sentence. "Chose Supabase over PGlite for v1" not "Database decision"
 - **content**: 2-5 sentences, self-contained. Include WHAT was decided/discovered, WHY, and what alternatives existed. Someone reading just this chain should understand the reasoning without the original conversation.
 - **type**: Use the correct category — `decision`, `exploration`, `rejection`, `solution`, `insight`
-- **tags**: 2-4 topic tags for searchability (e.g. `database`, `architecture`, `auth`)
-- **project**: Set to the current project name or path
+- **tags**: 2-4 topic tags for searchability (e.g. `database`, `architecture`, `auth`). Tags are included in both embedding text and full-text search, so choose meaningful keywords.
+- **project**: Set to the current project name or repo path. This is stored directly on the chain (not just inherited from the session), enabling cross-project search and filtering. Always set this.
+- **context**: Optional but valuable. A sentence or two about WHAT the user was doing when this reasoning occurred (e.g. "User was debugging a CI pipeline failure" or "During migration from Express to Fastify"). Provides surrounding context that helps recall relevance.
 
 ## Linking Related Chains
 

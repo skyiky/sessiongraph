@@ -9,7 +9,7 @@ import {
   type EmbeddingProvider,
 } from "../storage/provider.ts";
 import { REASONING_TYPES, RELATION_TYPES, BIDIRECTIONAL_RELATIONS } from "../config/types.ts";
-import type { RelationType } from "../config/types.ts";
+import type { RelationType, ChainSource } from "../config/types.ts";
 import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
 import { readFileSync, existsSync } from "fs";
@@ -76,6 +76,7 @@ server.registerTool(
       title: z.string().describe("A short title summarizing the reasoning (1 sentence)"),
       tags: z.array(z.string()).default([]).describe("Optional tags for categorization (e.g. 'database', 'architecture', 'performance')"),
       project: z.string().optional().describe("Project name or path this reasoning relates to"),
+      context: z.string().optional().describe("Additional context about when/where this reasoning occurred (e.g. file paths, error messages, environment details)"),
       related_to: z.array(z.object({
         chain_id: z.string().describe("ID of an existing reasoning chain to link to"),
         relation: z.enum(RELATION_TYPES).describe("Type of relationship: leads_to, supersedes, contradicts, builds_on, depends_on, refines, generalizes, analogous_to"),
@@ -85,8 +86,10 @@ server.registerTool(
   async (input) => {
     const { userId, storage, embeddings } = await ensureReady();
 
-    // Generate embedding for the content
-    const embeddingText = `${input.title}\n${input.content}`;
+    // Generate embedding for the content (include tags for better semantic matching)
+    const embeddingParts = [input.title, input.content];
+    if (input.tags.length > 0) embeddingParts.push(input.tags.join(", "));
+    const embeddingText = embeddingParts.join("\n");
     const embedding = await embeddings.generateEmbedding(embeddingText);
 
     const id = await storage.insertReasoningChain({
@@ -95,8 +98,12 @@ server.registerTool(
       type: input.type,
       title: input.title,
       content: input.content,
+      context: input.context,
       tags: input.tags,
       embedding,
+      project: input.project,
+      source: "mcp_capture" as ChainSource,
+      status: "active",
     });
 
     // Create relations if specified
@@ -159,6 +166,7 @@ server.registerTool(
 
     const results = await storage.searchReasoning({
       queryEmbedding,
+      queryText: input.query,
       userId,
       project: input.project,
       matchThreshold: 0.3,
@@ -181,7 +189,9 @@ server.registerTool(
         (r, i) =>
           `## ${i + 1}. [${r.type.toUpperCase()}] ${r.title}\n` +
           `ID: ${r.id}\n` +
-          `Similarity: ${(r.similarity * 100).toFixed(1)}% | Quality: ${(r.quality * 100).toFixed(0)}%\n` +
+          `Score: ${(r.score * 100).toFixed(1)}% | Similarity: ${(r.similarity * 100).toFixed(1)}% | Quality: ${(r.quality * 100).toFixed(0)}%\n` +
+          (r.project ? `Project: ${r.project}\n` : "") +
+          (r.source ? `Source: ${r.source}\n` : "") +
           `${r.content}\n` +
           (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
           `Date: ${r.createdAt}`
@@ -322,6 +332,7 @@ server.registerTool(
     inputSchema: z.object({
       chain_id: z.string().uuid().describe("The ID of the reasoning chain to explore connections for"),
       relation_type: z.enum(RELATION_TYPES).optional().describe("Filter to a specific relation type (e.g. 'builds_on', 'contradicts')"),
+      depth: z.number().min(1).max(3).default(1).describe("How many hops to traverse (1 = direct, 2-3 = multi-hop). Default: 1"),
       limit: z.number().default(20).describe("Maximum number of related chains to return"),
     }),
   },
@@ -331,6 +342,7 @@ server.registerTool(
     const results = await storage.getRelatedChains({
       chainId: input.chain_id,
       relationType: input.relation_type as RelationType | undefined,
+      depth: input.depth,
       limit: input.limit,
     });
 
@@ -350,7 +362,9 @@ server.registerTool(
         (r, i) =>
           `## ${i + 1}. ${r.direction === "outgoing" ? "→" : "←"} [${r.relationType}] ${r.title}\n` +
           `Chain ID: ${r.chainId}\n` +
-          `Type: ${r.type} | Direction: ${r.direction}\n` +
+          `Type: ${r.type} | Direction: ${r.direction} | Depth: ${r.depth}` +
+          (r.confidence != null ? ` | Confidence: ${(r.confidence * 100).toFixed(0)}%` : "") +
+          `\n` +
           `${r.content}\n` +
           (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
           `Date: ${r.createdAt}`

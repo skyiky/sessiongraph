@@ -33,11 +33,11 @@ Two storage modes, same interface:
 
 **Backfill:** CLI parses old sessions → Ollama `qwen2.5:3b` extracts reasoning chains → Ollama `qwen3-embedding:0.6b` embeds them → stores in PGlite.
 
-**Search:** User or agent calls `recall` → query embedded via Ollama → pgvector cosine similarity search → returns matching chains.
+**Search:** User or agent calls `recall` → query embedded via Ollama → hybrid search (vector similarity + full-text matching) → blended ranking → returns matching chains.
 
 ### Reasoning graph
 
-Chains connect via `chain_relations` table with 8 relation types: `leads_to`, `supersedes`, `contradicts`, `builds_on`, `depends_on`, `refines`, `generalizes`, `analogous_to`. Bidirectional relations (`contradicts`, `analogous_to`) are stored in both directions automatically.
+Chains connect via `chain_relations` table with 8 relation types: `leads_to`, `supersedes`, `contradicts`, `builds_on`, `depends_on`, `refines`, `generalizes`, `analogous_to`. Bidirectional relations (`contradicts`, `analogous_to`) are stored in both directions automatically. Relations store a `confidence` score (0-1) from the linker. Multi-hop graph traversal (depth 1-3) via BFS.
 
 ## Project Structure
 
@@ -51,7 +51,7 @@ src/
 │   └── ollama-extractor.ts  # Extracts reasoning chains from session text via Ollama
 ├── config/
 │   ├── config.ts         # Config factory, paths, ensureDataDir
-│   └── types.ts          # All TypeScript types, RELATION_TYPES, BIDIRECTIONAL_RELATIONS
+│   └── types.ts          # All TypeScript types, RELATION_TYPES, BIDIRECTIONAL_RELATIONS, ChainSource, ChainStatus
 ├── embeddings/
 │   ├── ollama.ts         # OllamaEmbeddingProvider
 │   └── supabase.ts       # SupabaseEmbeddingProvider
@@ -93,7 +93,11 @@ docs/
 
 **Removed legacy extractors:** `extractReasoningChains()` (LLM-based, required OpenAI key) and `extractReasoningChainsSimple()` (regex-based) both produced mediocre output. Deleted in favor of real-time capture + Ollama backfill.
 
-**Quality scoring:** Not all chains are equal. Each chain has a `quality` field (0-1, REAL DEFAULT 1.0). Real-time MCP capture = 1.0, Ollama backfill = 0.6. Search ranking uses a blended score: `similarity * (0.7 + 0.3 * quality)` — semantic relevance dominates, but higher-quality chains win at equal similarity. The threshold filter uses raw cosine similarity (quality doesn't exclude relevant chains).
+**Quality scoring:** Not all chains are equal. Each chain has a `quality` field (0-1, REAL DEFAULT 1.0). Real-time MCP capture = 1.0, Ollama backfill = 0.6.
+
+**Blended search ranking:** Search results use a blended score: `vector_similarity * 0.55 + text_match * 0.15 + quality * 0.15 + recency * 0.15`. The text_match component uses Postgres full-text search (`to_tsvector`/`plainto_tsquery`) when `queryText` is provided — this is hybrid search. Recency decay: `1.0 / (1.0 + age_in_days * 0.0005)` — gentle, ~15% penalty at 1 year. Tags are included in embedding text and full-text search index.
+
+**Chain metadata:** Each chain has `project` (direct, independent of session), `source` (`mcp_capture`, `backfill`, `agent_backfill`), and `status` (`active`, `superseded`). Creating a `supersedes` relation automatically sets the target chain's status to `superseded`. Superseded chains are excluded from search by default (opt-in via `includeSuperseded`).
 
 ## Conventions
 
@@ -108,7 +112,7 @@ docs/
 ## Testing
 
 ```bash
-# Run all tests (122 tests)
+# Run all tests (143 tests)
 bun test src/backfill/ollama-extractor.test.ts src/config/config.test.ts src/embeddings/ollama.test.ts src/storage/pglite.test.ts src/ingestion/parsers/claude-code.test.ts
 ```
 

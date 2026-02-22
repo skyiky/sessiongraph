@@ -8,6 +8,7 @@ import { runLinker } from "./backfill/linker.ts";
 import {
   bold, dim, cyan, green, yellow, red,
   typeBadge, colorPct, formatTags, separator, shortDate,
+  sourceBadge, statusIndicator,
 } from "./cli/format.ts";
 
 import { createInterface } from "node:readline";
@@ -233,6 +234,7 @@ program
     const queryEmbedding = await embeddings.generateEmbedding(query);
     const results = await storage.searchReasoning({
       queryEmbedding,
+      queryText: query,
       userId,
       project: opts.project,
       limit,
@@ -247,8 +249,10 @@ program
     console.log(`Found ${results.length} results:\n`);
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
-      console.log(`${typeBadge(r.type)} ${bold(r.title)}`);
-      console.log(`  ${colorPct(r.similarity, "Similarity")} ${dim("|")} ${colorPct(r.quality, "Quality")}`);
+      const badges = [typeBadge(r.type), sourceBadge(r.source), statusIndicator(r.status)].filter(Boolean).join(" ");
+      console.log(`${badges} ${bold(r.title)}`);
+      console.log(`  ${colorPct(r.score, "Score")} ${dim("|")} ${colorPct(r.similarity, "Similarity")} ${dim("|")} ${colorPct(r.quality, "Quality")}`);
+      if (r.project) console.log(`  ${dim("Project:")} ${green(r.project)}`);
       console.log(`  ${r.content}`);
       const tags = formatTags(r.tags);
       if (tags) console.log(`  ${tags}`);
@@ -626,6 +630,9 @@ program
           content: c.content,
           tags: c.tags,
           quality: c.quality,
+          project: c.project ?? null,
+          source: c.source ?? null,
+          status: c.status ?? "active",
           createdAt: c.createdAt,
         })),
       }));
@@ -649,11 +656,15 @@ program
         lines.push("");
 
         for (const c of entry.reasoningChains) {
-          lines.push(`### [${c.type.toUpperCase()}] ${c.title}\n`);
+          const statusMark = c.status === "superseded" ? " ~~(superseded)~~" : "";
+          lines.push(`### [${c.type.toUpperCase()}] ${c.title}${statusMark}\n`);
           lines.push(c.content);
           lines.push("");
           if (c.tags.length > 0) lines.push(`*Tags: ${c.tags.join(", ")}*`);
-          lines.push(`*Quality: ${((c.quality ?? 1.0) * 100).toFixed(0)}%*\n`);
+          const meta: string[] = [`Quality: ${((c.quality ?? 1.0) * 100).toFixed(0)}%`];
+          if (c.source) meta.push(`Source: ${c.source}`);
+          if (c.project) meta.push(`Project: ${c.project}`);
+          lines.push(`*${meta.join(" | ")}*\n`);
         }
 
         lines.push("---\n");

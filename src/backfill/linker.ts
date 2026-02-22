@@ -315,6 +315,7 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
               sourceChainId: chain.id,
               targetChainId: candidate.id,
               relationType: classification.relation,
+              confidence: classification.confidence,
             },
           ];
 
@@ -324,6 +325,7 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
               sourceChainId: candidate.id,
               targetChainId: chain.id,
               relationType: classification.relation,
+              confidence: classification.confidence,
             });
           }
 

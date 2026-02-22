@@ -71,17 +71,19 @@ sessiongraph search "why did we pick Supabase over PGlite?"
 
 Or the agent calls `recall("authentication strategy")` and gets back the full reasoning chain — the alternatives considered, the tradeoffs weighed, and the final decision.
 
+Search uses **hybrid matching** — combining vector similarity with Postgres full-text search. Even if your query words don't exactly match the embedding, keyword hits on titles, content, and tags still surface relevant chains. Results are ranked by a blended score: vector similarity (55%), text match (15%), quality (15%), and recency (15%).
+
 ### MCP Tools
 
 Your AI agents get seven tools via MCP:
 
 | Tool | What it does |
 |------|-------------|
-| `remember` | Save a reasoning chain (decision, insight, rejection, etc.). Supports `related_to` for linking chains. |
-| `recall` | Semantic search — "what do I know about X?" Returns matching chains with IDs. |
+| `remember` | Save a reasoning chain with project, context, and tags. Supports `related_to` for linking chains. |
+| `recall` | Hybrid search (vector + full-text) — returns matching chains with blended scores. |
 | `timeline` | Recent sessions with their reasoning chains, chronologically |
 | `sessions` | List past sessions, filterable by project or tool |
-| `graph` | Explore reasoning chain relations by chain ID |
+| `graph` | Explore reasoning chain relations with multi-hop traversal (depth 1-3) |
 | `get_sessions_to_backfill` | Get unprocessed sessions for agent-driven backfill |
 | `mark_session_backfilled` | Mark a session as processed |
 
@@ -100,7 +102,9 @@ Chains aren't isolated — they connect to each other. SessionGraph tracks eight
 | `generalizes` | A abstracts B into a broader pattern |
 | `analogous_to` | Similar reasoning in different contexts |
 
-Relations are created automatically via `sessiongraph link` or manually when calling `remember` with a `related_to` parameter.
+Relations are created automatically via `sessiongraph link` or manually when calling `remember` with a `related_to` parameter. Each relation stores a confidence score (0-1). When a chain is `superseded`, the target is automatically archived and hidden from default search results.
+
+The `graph` tool supports multi-hop traversal — explore chains up to 3 hops away to discover reasoning paths you didn't know existed.
 
 ### CLI
 

@@ -51,6 +51,32 @@ export function colorPct(value: number, label: string): string {
   return red(`${label}: ${pct}%`);
 }
 
+// ---- Source badge ----
+
+const SOURCE_LABELS: Record<string, string> = {
+  mcp_capture: "live",
+  backfill: "backfill",
+  agent_backfill: "agent",
+};
+
+/** Format a chain source as a short colored badge, e.g. "[live]" or "[backfill]" */
+export function sourceBadge(source?: string): string {
+  if (!source) return "";
+  const label = SOURCE_LABELS[source] ?? source;
+  if (source === "mcp_capture") return green(`[${label}]`);
+  if (source === "backfill") return yellow(`[${label}]`);
+  return cyan(`[${label}]`);
+}
+
+// ---- Status indicator ----
+
+/** Format a chain status indicator. Only shows for non-active statuses. */
+export function statusIndicator(status?: string): string {
+  if (!status || status === "active") return "";
+  if (status === "superseded") return dim("[superseded]");
+  return dim(`[${status}]`);
+}
+
 /** Format tags as a dim comma-separated list. */
 export function formatTags(tags: string[]): string {
   if (tags.length === 0) return "";

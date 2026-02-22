@@ -22,11 +22,13 @@ export interface ListSessionsOpts {
 
 export interface SearchReasoningOpts {
   queryEmbedding: number[];
+  queryText?: string; // Raw query text for full-text search (hybrid search)
   userId: string;
   project?: string;
   type?: string;
   matchThreshold?: number;
   limit?: number;
+  includeSuperseded?: boolean; // Include chains with status='superseded' (default: false)
 }
 
 export interface TimelineOpts {
@@ -39,6 +41,7 @@ export interface TimelineOpts {
 export interface GetRelatedChainsOpts {
   chainId: string;
   relationType?: RelationType;
+  depth?: number; // 1 = direct, 2-3 = multi-hop (default: 1, max: 3)
   limit?: number;
 }
 

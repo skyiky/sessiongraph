@@ -10,6 +10,8 @@ import type {
 } from "./provider.ts";
 import type {
   ChainRelation,
+  ChainSource,
+  ChainStatus,
   ChainWithEmbedding,
   ReasoningChain,
   ReasoningType,
@@ -152,6 +154,9 @@ export class SupabaseStorageProvider implements StorageProvider {
         tags: chain.tags,
         embedding: chain.embedding,
         quality: chain.quality ?? 1.0,
+        project: chain.project ?? null,
+        source: chain.source ?? "mcp_capture",
+        status: chain.status ?? "active",
       })
       .select("id")
       .single();
@@ -176,6 +181,9 @@ export class SupabaseStorageProvider implements StorageProvider {
           tags: chain.tags,
           embedding: chain.embedding,
           quality: chain.quality ?? 1.0,
+          project: chain.project ?? null,
+          source: chain.source ?? "mcp_capture",
+          status: chain.status ?? "active",
         }))
       )
       .select("id");
@@ -205,7 +213,11 @@ export class SupabaseStorageProvider implements StorageProvider {
       context: r.context,
       tags: r.tags,
       similarity: r.similarity,
+      score: r.similarity * (0.7 + 0.3 * (r.quality ?? 1.0)), // Approximate blended score until RPC is updated
       quality: r.quality ?? 1.0,
+      project: r.project ?? undefined,
+      source: (r.source as ChainSource) ?? undefined,
+      status: (r.status as ChainStatus) ?? undefined,
       createdAt: r.created_at,
     }));
 
@@ -238,13 +250,13 @@ export class SupabaseStorageProvider implements StorageProvider {
     const sessionIds = sessions.map((s: any) => s.id);
     const { data: chains, error: chainError } = await sb
       .from("reasoning_chains")
-      .select("id, session_id, type, title, content, tags, quality, created_at")
+      .select("id, session_id, type, title, content, tags, quality, project, source, status, created_at")
       .in("session_id", sessionIds)
       .order("created_at", { ascending: true });
 
     if (chainError) throw new Error(`Failed to get timeline chains: ${chainError.message}`);
 
-    const chainMap = new Map<string, { id: string; type: ReasoningType; title: string; content: string; tags: string[]; quality: number; createdAt: string }[]>();
+    const chainMap = new Map<string, TimelineEntry["reasoningChains"]>();
     for (const c of (chains ?? []) as any[]) {
       if (!chainMap.has(c.session_id)) chainMap.set(c.session_id, []);
       chainMap.get(c.session_id)!.push({
@@ -254,6 +266,9 @@ export class SupabaseStorageProvider implements StorageProvider {
         content: c.content,
         tags: c.tags ?? [],
         quality: c.quality ?? 1.0,
+        project: c.project ?? undefined,
+        source: (c.source as ChainSource) ?? undefined,
+        status: (c.status as ChainStatus) ?? undefined,
         createdAt: c.created_at,
       });
     }
@@ -297,6 +312,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           source_chain_id: relation.sourceChainId,
           target_chain_id: relation.targetChainId,
           relation_type: relation.relationType,
+          confidence: relation.confidence ?? null,
         },
         { onConflict: "source_chain_id,target_chain_id,relation_type" }
       )
@@ -317,6 +333,7 @@ export class SupabaseStorageProvider implements StorageProvider {
           source_chain_id: r.sourceChainId,
           target_chain_id: r.targetChainId,
           relation_type: r.relationType,
+          confidence: r.confidence ?? null,
         })),
         { onConflict: "source_chain_id,target_chain_id,relation_type" }
       )
@@ -329,11 +346,13 @@ export class SupabaseStorageProvider implements StorageProvider {
   async getRelatedChains(opts: GetRelatedChainsOpts): Promise<RelatedChainResult[]> {
     const sb = this.getClient();
     const limit = opts.limit ?? 20;
+    // Note: Supabase provider only supports depth=1 (direct relations) for now.
+    // Multi-hop would require recursive queries or RPC functions.
 
     // Query outgoing relations (this chain → others)
     let outgoingQuery = sb
       .from("chain_relations")
-      .select("target_chain_id, relation_type, reasoning_chains!chain_relations_target_chain_id_fkey(id, title, type, content, tags, created_at)")
+      .select("target_chain_id, relation_type, confidence, reasoning_chains!chain_relations_target_chain_id_fkey(id, title, type, content, tags, created_at)")
       .eq("source_chain_id", opts.chainId)
       .limit(limit);
 
@@ -344,7 +363,7 @@ export class SupabaseStorageProvider implements StorageProvider {
     // Query incoming relations (others → this chain)
     let incomingQuery = sb
       .from("chain_relations")
-      .select("source_chain_id, relation_type, reasoning_chains!chain_relations_source_chain_id_fkey(id, title, type, content, tags, created_at)")
+      .select("source_chain_id, relation_type, confidence, reasoning_chains!chain_relations_source_chain_id_fkey(id, title, type, content, tags, created_at)")
       .eq("target_chain_id", opts.chainId)
       .limit(limit);
 
@@ -366,6 +385,8 @@ export class SupabaseStorageProvider implements StorageProvider {
         chainId: chain.id,
         relationType: row.relation_type as RelationType,
         direction: "outgoing",
+        confidence: (row as any).confidence ?? undefined,
+        depth: 1,
         title: chain.title,
         type: chain.type as ReasoningType,
         content: chain.content,
@@ -381,6 +402,8 @@ export class SupabaseStorageProvider implements StorageProvider {
         chainId: chain.id,
         relationType: row.relation_type as RelationType,
         direction: "incoming",
+        confidence: (row as any).confidence ?? undefined,
+        depth: 1,
         title: chain.title,
         type: chain.type as ReasoningType,
         content: chain.content,
