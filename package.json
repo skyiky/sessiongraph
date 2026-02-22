@@ -4,7 +4,7 @@
   "description": "Searchable reasoning history for AI agent sessions. Captures decisions, explorations, rejections, and insights — makes them semantically searchable.",
   "module": "src/index.ts",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "author": "David Zhang",
   "repository": {
     "type": "git",

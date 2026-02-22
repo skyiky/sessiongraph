@@ -181,4 +181,4 @@ SessionGraph captures five types of reasoning:
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)
