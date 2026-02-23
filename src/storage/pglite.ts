@@ -10,6 +10,8 @@ import type {
   TimelineOpts,
   GetRelatedChainsOpts,
   ListChainsWithEmbeddingsOpts,
+  DriftWalkOpts,
+  SpreadActivationOpts,
 } from "./provider.ts";
 import type {
   ChainRelation,
@@ -26,6 +28,9 @@ import type {
   ChainSource,
   ChainStatus,
   SearchWeights,
+  DriftStep,
+  DriftResult,
+  ActivatedChain,
 } from "../config/types.ts";
 import { SEARCH_WEIGHT_PRESETS } from "../config/types.ts";
 
@@ -429,6 +434,7 @@ export class PGliteStorageProvider implements StorageProvider {
       textMatch: opts.weights?.textMatch ?? SEARCH_WEIGHT_PRESETS.default.textMatch!,
       quality: opts.weights?.quality ?? SEARCH_WEIGHT_PRESETS.default.quality!,
       recency: opts.weights?.recency ?? SEARCH_WEIGHT_PRESETS.default.recency!,
+      salience: opts.weights?.salience ?? SEARCH_WEIGHT_PRESETS.default.salience!,
     };
 
     const embeddingStr = toVectorLiteral(opts.queryEmbedding);
@@ -487,6 +493,8 @@ export class PGliteStorageProvider implements StorageProvider {
     params.push(w.quality);
     const wRecIdx = paramIdx++;
     params.push(w.recency);
+    const wSalIdx = paramIdx++;
+    params.push(w.salience);
 
     // Limit param
     params.push(limit);
@@ -495,8 +503,11 @@ export class PGliteStorageProvider implements StorageProvider {
     const whereClause = conditions.join("\n          AND ");
 
     // Blended ranking formula with parameterized weights:
-    //   score = vector_similarity * w_vec + text_match * w_text + quality * w_qual + recency * w_rec
+    //   score = vector_similarity * w_vec + text_match * w_text + quality * w_qual + recency * w_rec + salience * w_sal
     // Recency decay: 1.0 / (1.0 + age_in_days * 0.0005) — gentle, ~15% penalty at 1 year
+    // Salience: log-scaled recall_count + reference_count * 2, normalized to 0-1 range via
+    //   LN(1 + recall_count + reference_count * 2) / LN(1 + max_salience_across_all_chains)
+    //   reference_count weighted 2x because being referenced is a stronger structural signal
     const result = await db.query<{
       id: string;
       session_id: string | null;
@@ -532,6 +543,11 @@ export class PGliteStorageProvider implements StorageProvider {
            + ${textMatchExpr} * $${wTextIdx}
            + COALESCE(rc.quality, 1.0) * $${wQualIdx}
            + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.0005)) * $${wRecIdx}
+           + CASE WHEN $${wSalIdx}::float > 0 THEN
+               LN(1 + COALESCE(rc.recall_count, 0) + COALESCE(rc.reference_count, 0) * 2)
+               / GREATEST(LN(1 + COALESCE((SELECT MAX(COALESCE(recall_count,0) + COALESCE(reference_count,0) * 2) FROM reasoning_chains), 0)), 1.0)
+               * $${wSalIdx}::float
+             ELSE 0 END
          AS score,
          rc.project,
          rc.source,
@@ -1008,6 +1024,498 @@ export class PGliteStorageProvider implements StorageProvider {
 
     return parseInt(result.rows[0]?.count ?? "0", 10);
   }
+
+  // ---- Drift: Stochastic Graph Walk ----
+
+  async driftWalk(opts: DriftWalkOpts): Promise<DriftResult> {
+    const db = await this.getDb();
+    const steps = Math.min(Math.max(opts.steps ?? 5, 1), 20);
+    const temperature = Math.min(Math.max(opts.temperature ?? 0.7, 0), 1);
+
+    const walkSteps: DriftStep[] = [];
+    const visited = new Set<string>();
+
+    // Step 0: Select seed chain
+    let seedId = opts.seedChainId;
+    let seedWasRandom = !seedId;
+
+    if (!seedId) {
+      // Pick a random seed weighted by salience
+      const seed = await this.getRandomChainBySalience(db, opts.project);
+      if (!seed) {
+        return { steps: [], seedWasRandom: true };
+      }
+      seedId = seed.id;
+    }
+
+    // Fetch the seed chain's details
+    const seedChain = await this.getChainForDrift(db, seedId);
+    if (!seedChain) {
+      return { steps: [], seedWasRandom };
+    }
+
+    walkSteps.push(seedChain);
+    visited.add(seedId);
+
+    // Walk loop
+    let currentId = seedId;
+    for (let i = 1; i < steps; i++) {
+      const nextStep = await this.driftStep(db, currentId, visited, temperature, opts.project);
+
+      if (!nextStep) {
+        // Dead end and teleport failed — end the walk
+        break;
+      }
+
+      walkSteps.push(nextStep);
+      visited.add(nextStep.chainId);
+      currentId = nextStep.chainId;
+    }
+
+    return { steps: walkSteps, seedWasRandom };
+  }
+
+  /**
+   * Select a random chain weighted by salience (recall_count + reference_count).
+   * Uses a combination of quality, recency, and usage signals to bias toward "hot" chains.
+   */
+  private async getRandomChainBySalience(
+    db: PGlite,
+    project?: string,
+  ): Promise<{ id: string } | null> {
+    // Fetch top candidates by salience, then sample one stochastically.
+    // We grab more candidates than needed to allow for randomness.
+    let projectFilter = "";
+    const params: any[] = [];
+    let paramIdx = 1;
+
+    if (project) {
+      projectFilter = `AND rc.project = $${paramIdx++}`;
+      params.push(project);
+    }
+
+    const result = await db.query<{
+      id: string;
+      salience_score: number;
+    }>(
+      `SELECT
+         rc.id,
+         (COALESCE(rc.quality, 1.0) * 0.4
+           + LN(1 + COALESCE(rc.recall_count, 0) + COALESCE(rc.reference_count, 0) * 2) * 0.3
+           + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.005)) * 0.3
+         ) AS salience_score
+       FROM reasoning_chains rc
+       WHERE rc.embedding IS NOT NULL
+         AND COALESCE(rc.status, 'active') = 'active'
+         ${projectFilter}
+       ORDER BY salience_score DESC
+       LIMIT 20`,
+      params
+    );
+
+    if (result.rows.length === 0) return null;
+
+    // Softmax sample from the candidates
+    const scores = result.rows.map((r) => r.salience_score);
+    const idx = softmaxSample(scores, 0.8);
+    return { id: result.rows[idx]!.id };
+  }
+
+  /**
+   * Perform one step of the drift walk from the current node.
+   * Follows graph edges stochastically, with teleportation fallback.
+   */
+  private async driftStep(
+    db: PGlite,
+    currentId: string,
+    visited: Set<string>,
+    temperature: number,
+    project?: string,
+  ): Promise<DriftStep | null> {
+    // Get all graph neighbors (both directions)
+    const neighbors = await db.query<{
+      chain_id: string;
+      relation_type: string;
+      confidence: number | null;
+      title: string;
+      type: string;
+      content: string;
+      tags: string[];
+      quality: number;
+      recall_count: number;
+      reference_count: number;
+      created_at: string;
+      project: string | null;
+    }>(
+      `SELECT
+         rc.id AS chain_id,
+         cr.relation_type,
+         cr.confidence,
+         rc.title,
+         rc.type,
+         rc.content,
+         rc.tags,
+         COALESCE(rc.quality, 1.0) AS quality,
+         COALESCE(rc.recall_count, 0) AS recall_count,
+         COALESCE(rc.reference_count, 0) AS reference_count,
+         rc.created_at,
+         rc.project
+       FROM chain_relations cr
+       JOIN reasoning_chains rc ON rc.id = cr.target_chain_id
+       WHERE cr.source_chain_id = $1
+         AND COALESCE(rc.status, 'active') = 'active'
+         AND rc.embedding IS NOT NULL
+
+       UNION ALL
+
+       SELECT
+         rc.id AS chain_id,
+         cr.relation_type,
+         cr.confidence,
+         rc.title,
+         rc.type,
+         rc.content,
+         rc.tags,
+         COALESCE(rc.quality, 1.0) AS quality,
+         COALESCE(rc.recall_count, 0) AS recall_count,
+         COALESCE(rc.reference_count, 0) AS reference_count,
+         rc.created_at,
+         rc.project
+       FROM chain_relations cr
+       JOIN reasoning_chains rc ON rc.id = cr.source_chain_id
+       WHERE cr.target_chain_id = $1
+         AND COALESCE(rc.status, 'active') = 'active'
+         AND rc.embedding IS NOT NULL`,
+      [currentId]
+    );
+
+    // Filter out visited nodes and optionally filter by project
+    let candidates = neighbors.rows.filter(
+      (n) => !visited.has(n.chain_id) && (!project || n.project === project)
+    );
+
+    // Deduplicate (a chain could appear via multiple edges)
+    const seen = new Set<string>();
+    candidates = candidates.filter((c) => {
+      if (seen.has(c.chain_id)) return false;
+      seen.add(c.chain_id);
+      return true;
+    });
+
+    if (candidates.length > 0) {
+      // Score each candidate and sample
+      const scores = candidates.map((c) => {
+        const edgeConf = c.confidence ?? 0.5;
+        const salience = Math.log(1 + c.recall_count + c.reference_count * 2);
+        return edgeConf * c.quality * (1 + salience * 0.2);
+      });
+
+      const idx = softmaxSample(scores, temperature);
+      const chosen = candidates[idx]!;
+
+      return {
+        chainId: chosen.chain_id,
+        title: chosen.title,
+        type: chosen.type as ReasoningType,
+        content: chosen.content,
+        tags: chosen.tags ?? [],
+        quality: chosen.quality,
+        relationFromPrevious: chosen.relation_type as RelationType,
+        confidence: chosen.confidence ?? undefined,
+        salience: Math.log(1 + chosen.recall_count + chosen.reference_count * 2),
+        teleport: false,
+        createdAt: chosen.created_at,
+      };
+    }
+
+    // No unvisited graph neighbors — attempt teleportation
+    // Find a moderately similar chain via embedding (loose association)
+    return this.driftTeleport(db, currentId, visited, project);
+  }
+
+  /**
+   * Teleportation: when the walk reaches a dead end (no unvisited graph neighbors),
+   * find a chain with moderate embedding similarity (0.2-0.6 range) to simulate
+   * a long-range neural association jump.
+   */
+  private async driftTeleport(
+    db: PGlite,
+    currentId: string,
+    visited: Set<string>,
+    project?: string,
+  ): Promise<DriftStep | null> {
+    // Get current chain's embedding
+    const current = await db.query<{ embedding: string }>(
+      `SELECT embedding::text FROM reasoning_chains WHERE id = $1`,
+      [currentId]
+    );
+
+    if (current.rows.length === 0 || !current.rows[0]!.embedding) return null;
+
+    const embeddingStr = current.rows[0]!.embedding;
+
+    // Find chains in the moderate similarity range (0.2-0.6)
+    // This is the "interesting but not obvious" zone — too similar = boring, too different = noise
+    let projectFilter = "";
+    const params: any[] = [embeddingStr];
+    let paramIdx = 2;
+
+    // Exclude visited chains
+    const visitedArr = Array.from(visited);
+    if (visitedArr.length > 0) {
+      const placeholders = visitedArr.map((_, i) => `$${paramIdx + i}`).join(",");
+      params.push(...visitedArr);
+      paramIdx += visitedArr.length;
+    }
+
+    if (project) {
+      projectFilter = `AND rc.project = $${paramIdx++}`;
+      params.push(project);
+    }
+
+    const excludeClause = visitedArr.length > 0
+      ? `AND rc.id NOT IN (${visitedArr.map((_, i) => `$${2 + i}`).join(",")})`
+      : "";
+
+    const result = await db.query<{
+      id: string;
+      title: string;
+      type: string;
+      content: string;
+      tags: string[];
+      quality: number;
+      recall_count: number;
+      reference_count: number;
+      created_at: string;
+      similarity: number;
+    }>(
+      `SELECT
+         rc.id,
+         rc.title,
+         rc.type,
+         rc.content,
+         rc.tags,
+         COALESCE(rc.quality, 1.0) AS quality,
+         COALESCE(rc.recall_count, 0) AS recall_count,
+         COALESCE(rc.reference_count, 0) AS reference_count,
+         rc.created_at,
+         1 - (rc.embedding <=> $1::vector) AS similarity
+       FROM reasoning_chains rc
+       WHERE rc.embedding IS NOT NULL
+         AND COALESCE(rc.status, 'active') = 'active'
+         AND 1 - (rc.embedding <=> $1::vector) BETWEEN 0.2 AND 0.6
+         ${excludeClause}
+         ${projectFilter}
+       ORDER BY RANDOM()
+       LIMIT 5`,
+      params
+    );
+
+    if (result.rows.length === 0) return null;
+
+    // Pick one at random from the candidates (already randomized by DB)
+    const chosen = result.rows[0]!;
+
+    return {
+      chainId: chosen.id,
+      title: chosen.title,
+      type: chosen.type as ReasoningType,
+      content: chosen.content,
+      tags: chosen.tags ?? [],
+      quality: chosen.quality,
+      salience: Math.log(1 + chosen.recall_count + chosen.reference_count * 2),
+      teleport: true,
+      createdAt: chosen.created_at,
+    };
+  }
+
+  /** Fetch a single chain's details for use as a drift step. */
+  private async getChainForDrift(db: PGlite, chainId: string): Promise<DriftStep | null> {
+    const result = await db.query<{
+      id: string;
+      title: string;
+      type: string;
+      content: string;
+      tags: string[];
+      quality: number;
+      recall_count: number;
+      reference_count: number;
+      created_at: string;
+    }>(
+      `SELECT
+         id, title, type, content, tags,
+         COALESCE(quality, 1.0) AS quality,
+         COALESCE(recall_count, 0) AS recall_count,
+         COALESCE(reference_count, 0) AS reference_count,
+         created_at
+       FROM reasoning_chains
+       WHERE id = $1`,
+      [chainId]
+    );
+
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0]!;
+
+    return {
+      chainId: r.id,
+      title: r.title,
+      type: r.type as ReasoningType,
+      content: r.content,
+      tags: r.tags ?? [],
+      quality: r.quality,
+      salience: Math.log(1 + r.recall_count + r.reference_count * 2),
+      teleport: false,
+      createdAt: r.created_at,
+    };
+  }
+
+  // ---- Spreading Activation ----
+
+  async spreadActivation(opts: SpreadActivationOpts): Promise<ActivatedChain[]> {
+    const db = await this.getDb();
+    const hops = Math.min(Math.max(opts.hops ?? 2, 1), 3);
+    const decayFactor = opts.decayFactor ?? 0.5;
+    const minActivation = opts.minActivation ?? 0.1;
+    const limit = opts.limit ?? 3;
+
+    // Activation map: chainId → { activation, path, hops }
+    const activationMap = new Map<string, {
+      activation: number;
+      path: string[];
+      hopsFromSeed: number;
+    }>();
+
+    // Seed chains (these are the direct search results — we'll exclude them from output)
+    const seedSet = new Set(opts.initialChainIds);
+
+    // Initialize seeds
+    for (let i = 0; i < opts.initialChainIds.length; i++) {
+      const chainId = opts.initialChainIds[i]!;
+      const score = opts.initialScores[i] ?? 0.5;
+      activationMap.set(chainId, {
+        activation: score,
+        path: [chainId],
+        hopsFromSeed: 0,
+      });
+    }
+
+    // Spread activation hop by hop
+    for (let hop = 0; hop < hops; hop++) {
+      // Collect nodes to spread from at this hop level
+      const toSpread: Array<{ chainId: string; activation: number; path: string[] }> = [];
+
+      for (const [chainId, state] of activationMap) {
+        if (state.hopsFromSeed === hop) {
+          toSpread.push({ chainId, activation: state.activation, path: state.path });
+        }
+      }
+
+      for (const source of toSpread) {
+        // Get all neighbors via graph edges
+        const neighbors = await db.query<{
+          chain_id: string;
+          confidence: number | null;
+        }>(
+          `SELECT rc.id AS chain_id, cr.confidence
+           FROM chain_relations cr
+           JOIN reasoning_chains rc ON rc.id = cr.target_chain_id
+           WHERE cr.source_chain_id = $1
+             AND COALESCE(rc.status, 'active') = 'active'
+           UNION ALL
+           SELECT rc.id AS chain_id, cr.confidence
+           FROM chain_relations cr
+           JOIN reasoning_chains rc ON rc.id = cr.source_chain_id
+           WHERE cr.target_chain_id = $1
+             AND COALESCE(rc.status, 'active') = 'active'`,
+          [source.chainId]
+        );
+
+        for (const neighbor of neighbors.rows) {
+          const edgeConf = neighbor.confidence ?? 0.5;
+          const incomingActivation = source.activation * edgeConf * decayFactor;
+
+          if (incomingActivation < minActivation) continue;
+
+          const existing = activationMap.get(neighbor.chain_id);
+          if (existing) {
+            // Accumulate activation (a chain reached from multiple paths gets boosted)
+            if (!seedSet.has(neighbor.chain_id)) {
+              existing.activation += incomingActivation;
+            }
+          } else {
+            activationMap.set(neighbor.chain_id, {
+              activation: incomingActivation,
+              path: [...source.path, neighbor.chain_id],
+              hopsFromSeed: hop + 1,
+            });
+          }
+        }
+      }
+    }
+
+    // Collect non-seed activated chains above threshold
+    const activated: Array<{
+      chainId: string;
+      activation: number;
+      path: string[];
+      hopsFromSeed: number;
+    }> = [];
+
+    for (const [chainId, state] of activationMap) {
+      if (!seedSet.has(chainId) && state.activation >= minActivation) {
+        activated.push({
+          chainId,
+          activation: state.activation,
+          path: state.path,
+          hopsFromSeed: state.hopsFromSeed,
+        });
+      }
+    }
+
+    // Sort by activation descending, take top-N
+    activated.sort((a, b) => b.activation - a.activation);
+    const topActivated = activated.slice(0, limit);
+
+    if (topActivated.length === 0) return [];
+
+    // Fetch chain details for the top activated chains
+    const chainIds = topActivated.map((a) => a.chainId);
+    const placeholders = chainIds.map((_, i) => `$${i + 1}`).join(",");
+
+    const details = await db.query<{
+      id: string;
+      title: string;
+      type: string;
+      content: string;
+      tags: string[];
+      created_at: string;
+    }>(
+      `SELECT id, title, type, content, tags, created_at
+       FROM reasoning_chains
+       WHERE id IN (${placeholders})`,
+      chainIds
+    );
+
+    const detailMap = new Map(details.rows.map((r) => [r.id, r]));
+
+    return topActivated
+      .map((a) => {
+        const detail = detailMap.get(a.chainId);
+        if (!detail) return null;
+        return {
+          chainId: a.chainId,
+          title: detail.title,
+          type: detail.type as ReasoningType,
+          content: detail.content,
+          tags: detail.tags ?? [],
+          activation: a.activation,
+          activationPath: a.path,
+          hopsFromSeed: a.hopsFromSeed,
+          createdAt: detail.created_at,
+        };
+      })
+      .filter((x): x is ActivatedChain => x !== null);
+  }
 }
 
 /**
@@ -1024,4 +1532,44 @@ function parseVectorString(vecStr: string): number[] {
     }
   }
   return values;
+}
+
+/**
+ * Softmax sampling with temperature.
+ * Returns the index of the sampled element.
+ *
+ * - temperature = 0: always picks the highest score (greedy/argmax)
+ * - temperature = 1: probabilities proportional to exp(score)
+ * - temperature > 1: more uniform/random
+ * - temperature < 1: more peaked toward highest scores
+ */
+function softmaxSample(scores: number[], temperature: number): number {
+  if (scores.length === 0) return 0;
+  if (scores.length === 1) return 0;
+
+  // Greedy mode: return the index of the max score
+  if (temperature <= 0.01) {
+    let maxIdx = 0;
+    for (let i = 1; i < scores.length; i++) {
+      if (scores[i]! > scores[maxIdx]!) maxIdx = i;
+    }
+    return maxIdx;
+  }
+
+  // Scale scores by temperature and compute softmax
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((s) => Math.exp((s - maxScore) / temperature));
+  const sumExps = exps.reduce((a, b) => a + b, 0);
+  const probs = exps.map((e) => e / sumExps);
+
+  // Sample from the probability distribution
+  const r = Math.random();
+  let cumulative = 0;
+  for (let i = 0; i < probs.length; i++) {
+    cumulative += probs[i]!;
+    if (r <= cumulative) return i;
+  }
+
+  // Fallback (floating point edge case)
+  return probs.length - 1;
 }

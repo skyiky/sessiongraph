@@ -11,6 +11,8 @@ import type {
   SessionListEntry,
   TimelineEntry,
   ChainStatus,
+  DriftResult,
+  ActivatedChain,
 } from "../config/types.ts";
 
 // ---- Storage Provider Interface ----
@@ -52,6 +54,33 @@ export interface ListChainsWithEmbeddingsOpts {
   userId: string;
   limit?: number;
   offset?: number;
+}
+
+export interface DriftWalkOpts {
+  userId: string;
+  /** Starting chain ID. If omitted, a random chain is selected weighted by salience. */
+  seedChainId?: string;
+  /** Number of steps to walk (default: 5, max: 20) */
+  steps?: number;
+  /** Stochasticity: 0.0 = always follow strongest edge, 1.0 = uniform random (default: 0.7) */
+  temperature?: number;
+  /** Constrain walk to chains in this project */
+  project?: string;
+}
+
+export interface SpreadActivationOpts {
+  /** Seed chain IDs (typically from search results) */
+  initialChainIds: string[];
+  /** Initial activation scores for each seed (typically search scores) */
+  initialScores: number[];
+  /** How many hops to spread (default: 2, max: 3) */
+  hops?: number;
+  /** Activation decay per hop (default: 0.5) */
+  decayFactor?: number;
+  /** Minimum activation to include in results (default: 0.1) */
+  minActivation?: number;
+  /** Max serendipitous results to return (default: 3) */
+  limit?: number;
 }
 
 /**
@@ -105,6 +134,14 @@ export interface StorageProvider {
 
   /** Decay quality for chains not recalled within the given number of days. */
   decayUnusedChains(olderThanDays: number, decayFactor: number): Promise<number>;
+
+  // ---- Drift: Stochastic Graph Walk ----
+  /** Perform a stochastic walk through the reasoning graph. */
+  driftWalk(opts: DriftWalkOpts): Promise<DriftResult>;
+
+  // ---- Spreading Activation ----
+  /** Spread activation from seed chains through graph edges, finding associatively connected chains. */
+  spreadActivation(opts: SpreadActivationOpts): Promise<ActivatedChain[]>;
 }
 
 // ---- Embedding Provider Interface ----

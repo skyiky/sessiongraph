@@ -420,6 +420,7 @@ program
   .option("-k, --top-k <number>", "Top-K similar chains to compare (default: 5)", "5")
   .option("-d, --delay <seconds>", "Delay between classification calls in seconds (default: 1)", "1")
   .option("--threshold <number>", "Minimum similarity threshold for candidates (default: 0.5)", "0.5")
+  .option("--explore", "Also run exploration pass to discover cross-domain analogies (similarity 0.25-0.5 range)")
   .option("--threads <number>", "Limit CPU threads for Ollama inference")
   .option("--cpu-only", "Run on CPU only (no GPU)")
   .action(async (opts) => {
@@ -441,6 +442,7 @@ program
     console.log(`  Top-K: ${topK} candidates per chain`);
     console.log(`  Threshold: ${threshold}`);
     console.log(`  Delay: ${opts.delay}s between classifications`);
+    if (opts.explore) console.log(`  Exploration: enabled (cross-domain analogy discovery)`);
     if (opts.threads) console.log(`  CPU threads: ${opts.threads}`);
     if (opts.cpuOnly) console.log(`  Mode: CPU-only (no GPU)`);
     if (limit) console.log(`  Limit: ${limit} chains`);
@@ -452,13 +454,15 @@ program
       topK,
       threshold,
       delayMs,
+      explore: opts.explore ?? false,
       ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
       onProgress: (progress) => {
+        const phase = progress.exploration ? "explore" : "link";
         const pct = Math.round((progress.current / progress.total) * 100);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
         const cid = progress.chainId.slice(0, 8);
         process.stdout.write(
-          `\r\x1b[K[${pct}%] ${progress.current}/${progress.total} | chain:${cid} | ` +
+          `\r\x1b[K[${phase} ${pct}%] ${progress.current}/${progress.total} | chain:${cid} | ` +
           `${progress.candidatesFound} candidates, ${progress.relationsCreated} links [${elapsed}s]`
         );
         // Print newline after each chain
@@ -470,6 +474,9 @@ program
     console.log(`\nDone in ${totalElapsed}s!`);
     console.log(`  Chains processed: ${result.chainsProcessed}`);
     console.log(`  Relations created: ${result.relationsCreated}`);
+    if (result.explorationRelationsCreated > 0) {
+      console.log(`  Exploration relations: ${result.explorationRelationsCreated}`);
+    }
     if (result.errors.length > 0) {
       console.log(`  ${result.errors.length} error(s):`);
       for (const err of result.errors.slice(0, 5)) console.log(`    - ${err}`);
