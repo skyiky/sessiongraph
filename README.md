@@ -71,19 +71,21 @@ sessiongraph search "why did we pick Supabase over PGlite?"
 
 Or the agent calls `recall("authentication strategy")` and gets back the full reasoning chain — the alternatives considered, the tradeoffs weighed, and the final decision.
 
-Search uses **hybrid matching** — combining vector similarity with Postgres full-text search. Even if your query words don't exactly match the embedding, keyword hits on titles, content, and tags still surface relevant chains. Results are ranked by a blended score: vector similarity (55%), text match (15%), quality (15%), and recency (15%).
+Search uses **hybrid matching** — combining vector similarity with Postgres full-text search. Even if your query words don't exactly match the embedding, keyword hits on titles, content, and tags still surface relevant chains. Results are ranked by a blended score: vector similarity (55%), text match (15%), quality (15%), and recency (15%). An optional `salience` weight factors in how often a chain is recalled and referenced — the `creative` preset sets salience to 0.30, surfacing well-connected chains more prominently.
 
 ### MCP Tools
 
-Your AI agents get seven tools via MCP:
+Your AI agents get nine tools via MCP:
 
 | Tool | What it does |
 |------|-------------|
 | `remember` | Save a reasoning chain with project, context, and tags. Supports `related_to` for linking chains. |
-| `recall` | Hybrid search (vector + full-text) — returns matching chains with blended scores. |
+| `recall` | Hybrid search (vector + full-text) — returns matching chains with blended scores. Supports `spread` for associative activation. |
 | `timeline` | Recent sessions with their reasoning chains, chronologically |
 | `sessions` | List past sessions, filterable by project or tool |
 | `graph` | Explore reasoning chain relations with multi-hop traversal (depth 1-3) |
+| `drift` | Stochastic random walk through the reasoning graph — discovers unexpected connections via softmax sampling and teleportation |
+| `update_chain` | Update mutable fields on an existing chain (tags, quality, metadata, status) |
 | `get_sessions_to_backfill` | Get unprocessed sessions for agent-driven backfill |
 | `mark_session_backfilled` | Mark a session as processed |
 
@@ -106,6 +108,18 @@ Relations are created automatically via `sessiongraph link` or manually when cal
 
 The `graph` tool supports multi-hop traversal — explore chains up to 3 hops away to discover reasoning paths you didn't know existed.
 
+### Drift: Emergent Creativity
+
+Human memory works through stochastic associative retrieval — neurons fire semi-randomly, creating unexpected connections. That's where eureka moments come from. SessionGraph's **Drift** features bring this to reasoning search.
+
+**Drift walks** — A stochastic random walk through the reasoning graph. Instead of returning the "best match," drift explores outward from a starting chain by softmax-sampling edges weighted by confidence. A teleportation mechanism (~30% probability) jumps to embedding-similar but unconnected chains, simulating the loose neural associations that produce creative insights.
+
+**Spreading activation** — Augments search results with associatively connected chains. Activation energy propagates from your search results through graph edges, decaying at each hop. Chains reached from multiple paths accumulate more activation and rank higher — surfacing context you didn't think to search for.
+
+**Cross-domain edge discovery** — The auto-linker's `--explore` flag looks at chains with embedding similarity 0.25-0.5 (the "interesting but not obvious" zone) and uses analogy-focused LLM prompting to discover `analogous_to` connections between distant reasoning chains across different projects.
+
+**Salience-weighted ranking** — Chains that get recalled frequently or are referenced by many other chains score higher via a log-scaled salience component. The `creative` weight preset emphasizes salience and reduces reliance on exact vector matching.
+
 ### CLI
 
 ```bash
@@ -116,6 +130,7 @@ sessiongraph stats            # chain count by type, sessions by tool, storage s
 sessiongraph export           # export chains to JSON or Markdown
 sessiongraph backfill         # extract reasoning from past sessions
 sessiongraph link             # auto-link related chains via embeddings
+sessiongraph link --explore   # also discover cross-domain analogies (similarity 0.25-0.5)
 sessiongraph login            # authenticate for cloud sync
 sessiongraph signup           # create a cloud account
 sessiongraph logout           # clear stored credentials

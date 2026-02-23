@@ -1,6 +1,6 @@
 # SessionGraph Roadmap
 
-> Last updated: 2026-02-22
+> Last updated: 2026-02-23
 
 What's shipped is documented in [CLAUDE.md](../CLAUDE.md). This file covers what's next.
 
@@ -14,6 +14,15 @@ What's shipped is documented in [CLAUDE.md](../CLAUDE.md). This file covers what
 - **2.4 CLI Polish** — `search` with colors, `stats`, `export` to JSON/Markdown.
 - **Core Overhaul** — Hybrid search (vector + full-text), chain metadata (project, source, status, context), multi-hop graph traversal (depth 1-3), auto-archive via `supersedes` relation.
 - **PGlite Resilience** — Filesystem lock prevents concurrent access, corruption detection with recovery instructions, hardened MCP shutdown handlers.
+
+### Drift: Emergent Creativity (v0.3)
+
+- **Salience-weighted ranking** — `recall_count` and `reference_count` influence search results via log-scaled `salience` weight component. New `creative` weight preset (salience: 0.30).
+- **Stochastic drift walk** — Random walk through the reasoning graph with softmax-sampled edge traversal and teleportation to embedding-similar but unconnected chains. Exposed as `drift` MCP tool.
+- **Spreading activation** — Augments search results with associatively connected chains. Activation propagates through graph edges with decay. Added `spread` parameter to `recall` MCP tool.
+- **Cross-domain edge discovery** — Auto-linker `--explore` flag discovers `analogous_to` connections between distant chains (similarity 0.25-0.5) using analogy-focused LLM prompting.
+- **Mind wandering design doc** — Architecture for autonomous background exploration (`src/drift/DESIGN.md`). Design only, not implemented.
+- **`update_chain` MCP tool** — Update mutable fields (tags, quality, metadata, status) on existing chains.
 
 ---
 
