@@ -599,7 +599,11 @@ async function main() {
 }
 
 // ---- Graceful shutdown ----
+let isShuttingDown = false;
+
 async function shutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   console.error(`\nReceived ${signal}, shutting down...`);
   try {
     await resetProviders();
@@ -611,6 +615,7 @@ async function shutdown(signal: string) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("beforeExit", () => shutdown("beforeExit"));
 
 main().catch((err) => {
   console.error("Fatal error:", err);
