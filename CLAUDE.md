@@ -39,6 +39,20 @@ Two storage modes, same interface:
 
 Chains connect via `chain_relations` table with 8 relation types: `leads_to`, `supersedes`, `contradicts`, `builds_on`, `depends_on`, `refines`, `generalizes`, `analogous_to`. Bidirectional relations (`contradicts`, `analogous_to`) are stored in both directions automatically. Relations store a `confidence` score (0-1) from the linker. Multi-hop graph traversal (depth 1-3) via BFS.
 
+### Drift: Stochastic graph exploration
+
+Emergent creativity features inspired by how human memory works through stochastic associative retrieval.
+
+**Salience-weighted ranking:** `recall_count` and `reference_count` influence search results via the `salience` weight component. Log-scaled: `log(1 + recall_count + reference_count * 2) / log(20)`. The `creative` preset sets salience to 0.30, reducing vector similarity to 0.35.
+
+**Drift walk (`driftWalk`):** Stochastic random walk through the reasoning graph. At each step, selects the next chain by softmax-sampling outgoing edges weighted by confidence, with temperature controlling stochasticity. Includes a teleportation mechanism (probability ~0.3) that jumps to embedding-similar but unconnected chains (similarity 0.2-0.6 zone), simulating loose neural associations. MCP tool: `drift`.
+
+**Spreading activation (`spreadActivation`):** Augments search results with associatively connected chains. Activation energy propagates from search result seeds through graph edges, decaying at each hop. Chains that accumulate activation from multiple paths rank higher. MCP parameter: `spread: true` on `recall` tool.
+
+**Cross-domain edge discovery:** The auto-linker's `--explore` flag runs an additional pass looking at chains with embedding similarity 0.25-0.5 (the "interesting but not obvious" zone). Uses a different LLM prompt focused on analogy detection with a lower confidence threshold (0.5 vs 0.7). Produces `analogous_to` edges between distant chains.
+
+**Mind wandering (design only):** Architecture for autonomous background exploration. Design doc at `src/drift/DESIGN.md`. Not implemented — Phase 5 of the drift feature.
+
 ## Project Structure
 
 ```
@@ -47,18 +61,18 @@ src/
 ├── auth/auth.ts          # Supabase auth, credential storage (0o600 perms)
 ├── backfill/
 │   ├── backfill.ts       # Backfill orchestrator (periodic state saves, graceful shutdown)
-│   ├── linker.ts         # Auto-linker: discovers chain relations via embedding similarity
+│   ├── linker.ts         # Auto-linker: discovers chain relations via embedding similarity + cross-domain exploration
 │   └── ollama-extractor.ts  # Extracts reasoning chains from session text via Ollama
 ├── config/
 │   ├── config.ts         # Config factory, paths, ensureDataDir
-│   └── types.ts          # All TypeScript types, RELATION_TYPES, BIDIRECTIONAL_RELATIONS, ChainSource, ChainStatus
+│   └── types.ts          # All TypeScript types, RELATION_TYPES, BIDIRECTIONAL_RELATIONS, ChainSource, ChainStatus, DriftStep, DriftResult, ActivatedChain
 ├── embeddings/
 │   ├── ollama.ts         # OllamaEmbeddingProvider
 │   └── supabase.ts       # SupabaseEmbeddingProvider
 ├── ingestion/parsers/
 │   ├── opencode.ts       # Parses OpenCode SQLite DB (shared read-only connection)
 │   └── claude-code.ts    # Parses Claude Code JSONL sessions (cached history.jsonl)
-├── mcp/server.ts         # MCP server (7 tools: remember, recall, timeline, sessions, graph, get_sessions_to_backfill, mark_session_backfilled)
+├── mcp/server.ts         # MCP server (9 tools: remember, recall, timeline, sessions, graph, drift, update_chain, get_sessions_to_backfill, mark_session_backfilled)
 ├── storage/
 │   ├── provider.ts       # StorageProvider + EmbeddingProvider interfaces, singleton factories
 │   ├── pglite.ts         # PGliteStorageProvider (local, lazy init)
@@ -66,6 +80,8 @@ src/
 │   ├── sync.ts           # Local → cloud sync
 │   └── buffer.ts         # Offline write buffer (SQLite, retry with backoff)
 ├── capture/              # Real-time capture utilities
+├── drift/
+│   └── DESIGN.md         # Mind wandering design doc (Phase 5, design only)
 └── cli/
     ├── init.ts           # Interactive setup wizard
     ├── detect.ts         # AI tool detection
@@ -95,7 +111,7 @@ docs/
 
 **Quality scoring:** Not all chains are equal. Each chain has a `quality` field (0-1, REAL DEFAULT 1.0). Real-time MCP capture = 1.0, Ollama backfill = 0.6.
 
-**Blended search ranking:** Search results use a blended score: `vector_similarity * 0.55 + text_match * 0.15 + quality * 0.15 + recency * 0.15`. The text_match component uses Postgres full-text search (`to_tsvector`/`plainto_tsquery`) when `queryText` is provided — this is hybrid search. Recency decay: `1.0 / (1.0 + age_in_days * 0.0005)` — gentle, ~15% penalty at 1 year. Tags are included in embedding text and full-text search index.
+**Blended search ranking:** Search results use a blended score: `vector_similarity * 0.55 + text_match * 0.15 + quality * 0.15 + recency * 0.15`. The text_match component uses Postgres full-text search (`to_tsvector`/`plainto_tsquery`) when `queryText` is provided — this is hybrid search. Recency decay: `1.0 / (1.0 + age_in_days * 0.0005)` — gentle, ~15% penalty at 1 year. Tags are included in embedding text and full-text search index. An optional `salience` weight (default: 0) factors in `recall_count` and `reference_count` via log scaling — the `creative` preset sets salience to 0.30.
 
 **Chain metadata:** Each chain has `project` (direct, independent of session), `source` (`mcp_capture`, `backfill`, `agent_backfill`), and `status` (`active`, `superseded`). Creating a `supersedes` relation automatically sets the target chain's status to `superseded`. Superseded chains are excluded from search by default (opt-in via `includeSuperseded`).
 
@@ -128,6 +144,7 @@ sessiongraph stats            # chain count by type, sessions by tool, storage s
 sessiongraph export           # dump reasoning chains to JSON or Markdown
 sessiongraph backfill         # extract reasoning from past sessions via Ollama
 sessiongraph link             # auto-link related chains via embedding similarity
+sessiongraph link --explore   # also discover cross-domain analogies (similarity 0.25-0.5)
 sessiongraph login            # authenticate for cloud sync
 sessiongraph signup           # create a cloud account
 sessiongraph logout           # clear stored credentials

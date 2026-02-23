@@ -162,14 +162,16 @@ export interface SearchWeights {
   textMatch?: number; // Weight for full-text search match (default: 0.15)
   quality?: number; // Weight for quality score (default: 0.15)
   recency?: number; // Weight for recency (default: 0.15)
+  salience?: number; // Weight for recall_count + reference_count signal (default: 0)
 }
 
 // Preset weight profiles for different use cases
 export const SEARCH_WEIGHT_PRESETS = {
-  default: { vectorSimilarity: 0.55, textMatch: 0.15, quality: 0.15, recency: 0.15 } as SearchWeights,
-  agentCognition: { vectorSimilarity: 0.45, textMatch: 0.15, quality: 0.30, recency: 0.10 } as SearchWeights,
-  recentFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.10, recency: 0.45 } as SearchWeights,
-  qualityFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.45, recency: 0.10 } as SearchWeights,
+  default: { vectorSimilarity: 0.55, textMatch: 0.15, quality: 0.15, recency: 0.15, salience: 0 } as SearchWeights,
+  agentCognition: { vectorSimilarity: 0.45, textMatch: 0.15, quality: 0.30, recency: 0.10, salience: 0 } as SearchWeights,
+  recentFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.10, recency: 0.45, salience: 0 } as SearchWeights,
+  qualityFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.45, recency: 0.10, salience: 0 } as SearchWeights,
+  creative: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.15, recency: 0.10, salience: 0.30 } as SearchWeights,
 } as const;
 
 export interface TimelineEntry {
@@ -201,4 +203,50 @@ export interface SessionListEntry {
   endedAt?: string;
   summary?: string;
   chainCount: number;
+}
+
+// ---- Drift: Stochastic Graph Walk ----
+
+/** A single step in a drift walk */
+export interface DriftStep {
+  chainId: string;
+  title: string;
+  type: ReasoningType;
+  content: string;
+  tags: string[];
+  quality: number;
+  /** How we arrived at this chain from the previous step */
+  relationFromPrevious?: RelationType;
+  /** Edge confidence (if we followed a graph edge) */
+  confidence?: number;
+  /** Computed salience score for this chain */
+  salience: number;
+  /** Whether this step was a "teleport" (loose association jump, not a graph edge) */
+  teleport: boolean;
+  createdAt: string;
+}
+
+/** Result of a drift walk */
+export interface DriftResult {
+  steps: DriftStep[];
+  /** Whether the seed chain was randomly selected */
+  seedWasRandom: boolean;
+}
+
+// ---- Spreading Activation ----
+
+/** A chain activated via spreading activation through the graph */
+export interface ActivatedChain {
+  chainId: string;
+  title: string;
+  type: ReasoningType;
+  content: string;
+  tags: string[];
+  /** Accumulated activation score */
+  activation: number;
+  /** Chain IDs showing how activation spread to reach this chain */
+  activationPath: string[];
+  /** Number of hops from the nearest seed */
+  hopsFromSeed: number;
+  createdAt: string;
 }

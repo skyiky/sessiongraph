@@ -156,13 +156,15 @@ server.registerTool(
       project: z.string().optional().describe("Filter to a specific project"),
       type: z.enum(REASONING_TYPES).optional().describe("Filter by reasoning type"),
       limit: z.number().default(5).describe("Maximum number of results to return"),
+      spread: z.boolean().default(false).describe("Enable spreading activation to find serendipitous connections. Returns additional 'associatively connected' results beyond direct matches, discovered by following graph edges from search results."),
       weights: z.object({
         vectorSimilarity: z.number().optional().describe("Weight for vector similarity (default: 0.55)"),
         textMatch: z.number().optional().describe("Weight for text match (default: 0.15)"),
         quality: z.number().optional().describe("Weight for quality score (default: 0.15)"),
         recency: z.number().optional().describe("Weight for recency (default: 0.15)"),
+        salience: z.number().optional().describe("Weight for recall/reference count signal (default: 0). Higher values favor frequently-recalled and highly-connected chains."),
       }).optional().describe("Custom search ranking weights. Use preset 'agentCognition' for durable mental models (quality=0.30, recency=0.10)."),
-      weightPreset: z.enum(["default", "agentCognition", "recentFirst", "qualityFirst"]).optional().describe("Use a preset weight profile instead of custom weights"),
+      weightPreset: z.enum(["default", "agentCognition", "recentFirst", "qualityFirst", "creative"]).optional().describe("Use a preset weight profile instead of custom weights. 'creative' heavily weights salience (recall_count + reference_count) for serendipitous retrieval."),
     }),
   },
   async (input) => {
@@ -222,11 +224,45 @@ server.registerTool(
       )
       .join("\n\n---\n\n");
 
+    // Spreading activation: find serendipitous connections via graph edges
+    let spreadSection = "";
+    if (input.spread && results.length > 0) {
+      try {
+        const activated = await storage.spreadActivation({
+          initialChainIds: results.map((r) => r.id),
+          initialScores: results.map((r) => r.score),
+          hops: 2,
+          decayFactor: 0.5,
+          minActivation: 0.1,
+          limit: 3,
+        });
+
+        if (activated.length > 0) {
+          const activatedFormatted = activated
+            .map(
+              (a, i) =>
+                `## S${i + 1}. [${a.type.toUpperCase()}] ${a.title}\n` +
+                `ID: ${a.chainId}\n` +
+                `Activation: ${(a.activation * 100).toFixed(1)}% | ${a.hopsFromSeed} hop(s) from search results\n` +
+                `Path: ${a.activationPath.map((id) => id.slice(0, 8)).join(" → ")}\n` +
+                `${a.content}\n` +
+                (a.tags.length > 0 ? `Tags: ${a.tags.join(", ")}\n` : "") +
+                `Date: ${a.createdAt}`
+            )
+            .join("\n\n---\n\n");
+
+          spreadSection = `\n\n===\n\n**Serendipitous connections** (via spreading activation):\n\n${activatedFormatted}`;
+        }
+      } catch {
+        // Spreading activation is best-effort — don't fail the entire recall
+      }
+    }
+
     return {
       content: [
         {
           type: "text" as const,
-          text: `Found ${results.length} relevant reasoning chains:\n\n${formatted}`,
+          text: `Found ${results.length} relevant reasoning chains:\n\n${formatted}${spreadSection}`,
         },
       ],
     };
@@ -400,6 +436,75 @@ server.registerTool(
         {
           type: "text" as const,
           text: `Found ${results.length} related chain(s) for ${input.chain_id}:\n\n${formatted}`,
+        },
+      ],
+    };
+  }
+);
+
+// ---- Tool: drift ----
+server.registerTool(
+  "drift",
+  {
+    description:
+      "Take a stochastic random walk through your reasoning graph. Returns a chain of associatively connected memories — like a train of thought. " +
+      "Use this for creative exploration, finding unexpected connections, or when you want inspiration without a specific query. " +
+      "Each step follows graph edges probabilistically, with occasional 'teleport' jumps to moderately similar but unconnected chains (simulating loose associations). " +
+      "Lower temperature = more coherent walks following strong edges. Higher temperature = more random, creative walks.",
+    inputSchema: z.object({
+      seed_chain_id: z.string().uuid().optional().describe("Starting chain ID. If omitted, a random chain is selected weighted by salience (recall frequency + connectivity)."),
+      steps: z.number().min(1).max(20).default(5).describe("Number of steps to walk (default: 5)"),
+      temperature: z.number().min(0).max(1).default(0.7).describe("Stochasticity: 0.0 = always follow strongest edge, 1.0 = near-uniform random (default: 0.7)"),
+      project: z.string().optional().describe("Constrain walk to chains in this project"),
+    }),
+  },
+  async (input) => {
+    const { userId, storage } = await ensureReady();
+
+    const result = await storage.driftWalk({
+      userId,
+      seedChainId: input.seed_chain_id,
+      steps: input.steps,
+      temperature: input.temperature,
+      project: input.project,
+    });
+
+    if (result.steps.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "No chains found for drift walk. The reasoning graph may be empty.",
+          },
+        ],
+      };
+    }
+
+    const formatted = result.steps
+      .map((step, i) => {
+        const prefix = i === 0
+          ? `## Step ${i + 1} (seed${result.seedWasRandom ? ", randomly selected" : ""})`
+          : step.teleport
+            ? `## Step ${i + 1} ⟿ TELEPORT (loose association jump)`
+            : `## Step ${i + 1} → [${step.relationFromPrevious}]${step.confidence != null ? ` (${(step.confidence * 100).toFixed(0)}% confidence)` : ""}`;
+
+        return (
+          `${prefix}\n` +
+          `**[${step.type.toUpperCase()}] ${step.title}**\n` +
+          `ID: ${step.chainId}\n` +
+          `Quality: ${(step.quality * 100).toFixed(0)}% | Salience: ${step.salience.toFixed(2)}\n` +
+          `${step.content}\n` +
+          (step.tags.length > 0 ? `Tags: ${step.tags.join(", ")}\n` : "") +
+          `Date: ${step.createdAt}`
+        );
+      })
+      .join("\n\n---\n\n");
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Drift walk (${result.steps.length} steps, temperature=${input.temperature}):\n\n${formatted}`,
         },
       ],
     };

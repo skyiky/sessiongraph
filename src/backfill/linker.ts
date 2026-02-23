@@ -22,6 +22,8 @@ export interface LinkOptions {
     numGpu?: number;
     numCtx?: number;
   };
+  /** Run exploration pass to discover cross-domain connections (similarity 0.25-0.5) */
+  explore?: boolean;
   /** Progress callback */
   onProgress?: (progress: LinkProgress) => void;
 }
@@ -32,12 +34,16 @@ export interface LinkProgress {
   chainId: string;
   candidatesFound: number;
   relationsCreated: number;
+  /** Whether this progress update is from the exploration pass */
+  exploration?: boolean;
 }
 
 export interface LinkResult {
   chainsProcessed: number;
   chainsSkipped: number;
   relationsCreated: number;
+  /** Relations created by the exploration pass (subset of relationsCreated) */
+  explorationRelationsCreated: number;
   errors: string[];
 }
 
@@ -73,6 +79,34 @@ const CLASSIFY_TIMEOUT_MS = 60_000;
 /** Minimum confidence to store a relation */
 const MIN_CONFIDENCE = 0.7;
 
+/** Lower confidence threshold for exploration-discovered analogies */
+const MIN_EXPLORATION_CONFIDENCE = 0.5;
+
+// --- Exploration prompt (cross-domain analogy discovery) ---
+
+const EXPLORATION_PROMPT = `You discover hidden analogies and cross-domain connections between reasoning chains from AI coding sessions.
+
+These chains may be about completely different projects, languages, or problem domains — but they may share structural similarities, common patterns, or transferable insights.
+
+Given Chain A and Chain B, determine if there is a meaningful ANALOGY or cross-domain connection between them.
+
+Look for:
+- Similar problem structures solved in different domains
+- Common patterns applied in different contexts (e.g., retry logic in networking vs. database connections)
+- Shared architectural decisions despite different tech stacks
+- Similar failure modes or debugging approaches across unrelated problems
+- Transferable insights: a lesson from one domain that illuminates another
+
+Return a JSON object: {"relation": "analogous_to" or "none", "confidence": 0.0-1.0, "insight": "one-sentence explanation of the connection"}
+
+Rules:
+- ONLY return "analogous_to" or "none". No other relation types.
+- The threshold for "interesting" is lower here — surface connections that are surprising or non-obvious.
+- A confidence of 0.5+ means "this analogy could spark a useful connection."
+- 0.7+ means "this is a strong, actionable analogy."
+- "none" is still correct when there is genuinely no structural similarity.
+- Return ONLY the JSON object. No other text.`;
+
 // --- Link state persistence ---
 
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -80,6 +114,8 @@ const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
 interface LinkState {
   /** Chain IDs that have already been processed (linked against all candidates) */
   linkedChainIds: string[];
+  /** Chain IDs that have been processed by the exploration pass */
+  exploredChainIds: string[];
 }
 
 function getStatePath(): string {
@@ -89,7 +125,7 @@ function getStatePath(): string {
 function loadState(): LinkState {
   const statePath = getStatePath();
   if (!existsSync(statePath)) {
-    return { linkedChainIds: [] };
+    return { linkedChainIds: [], exploredChainIds: [] };
   }
   try {
     const raw = readFileSync(statePath, "utf-8");
@@ -98,9 +134,12 @@ function loadState(): LinkState {
       linkedChainIds: Array.isArray(parsed.linkedChainIds)
         ? parsed.linkedChainIds
         : [],
+      exploredChainIds: Array.isArray(parsed.exploredChainIds)
+        ? parsed.exploredChainIds
+        : [],
     };
   } catch {
-    return { linkedChainIds: [] };
+    return { linkedChainIds: [], exploredChainIds: [] };
   }
 }
 
@@ -203,6 +242,97 @@ What is the relationship from Chain A to Chain B?`;
   }
 }
 
+// --- Exploration classification (analogy-focused) ---
+
+interface ExplorationClassificationResult {
+  relation: "analogous_to" | "none";
+  confidence: number;
+  insight?: string;
+}
+
+async function classifyPairForAnalogy(
+  chainA: ChainWithEmbedding,
+  chainB: ChainWithEmbedding,
+  opts?: LinkOptions["ollamaOptions"],
+): Promise<ExplorationClassificationResult> {
+  const model = config.ollama.chatModel;
+  const baseUrl = config.ollama.baseUrl;
+
+  const userPrompt = `Chain A [${chainA.type}]: ${chainA.title}
+${chainA.content}
+
+Chain B [${chainB.type}]: ${chainB.title}
+${chainB.content}
+
+Is there a hidden analogy or cross-domain connection between these chains?`;
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: EXPLORATION_PROMPT },
+          { role: "user", content: userPrompt },
+        ],
+        stream: false,
+        format: "json",
+        options: {
+          ...(opts?.numThread != null && { num_thread: opts.numThread }),
+          ...(opts?.numGpu != null && { num_gpu: opts.numGpu }),
+          num_ctx: opts?.numCtx ?? 4096,
+        },
+      }),
+      signal: AbortSignal.timeout(CLASSIFY_TIMEOUT_MS),
+    });
+  } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error(`Exploration classification timed out after ${CLASSIFY_TIMEOUT_MS / 1000}s`);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Ollama request failed: ${message}`);
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Ollama API error (${response.status}): ${body}`);
+  }
+
+  const result = (await response.json()) as { message?: { content?: string } };
+  const content = result.message?.content;
+  if (!content) return { relation: "none", confidence: 0 };
+
+  // Clean response
+  let cleaned = content.trim();
+  const thinkEnd = cleaned.indexOf("</think>");
+  if (thinkEnd !== -1) {
+    cleaned = cleaned.slice(thinkEnd + 8).trim();
+  }
+  if (cleaned.startsWith("```json")) cleaned = cleaned.slice(7);
+  else if (cleaned.startsWith("```")) cleaned = cleaned.slice(3);
+  if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, -3);
+  cleaned = cleaned.trim();
+
+  try {
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    const relation = String(parsed.relation ?? "none").toLowerCase().trim();
+    const confidence = Number(parsed.confidence ?? 0);
+    const insight = typeof parsed.insight === "string" ? parsed.insight : undefined;
+
+    if (relation !== "analogous_to") return { relation: "none", confidence: 0 };
+
+    return {
+      relation: "analogous_to",
+      confidence: Number.isFinite(confidence) ? confidence : 0,
+      insight,
+    };
+  } catch {
+    return { relation: "none", confidence: 0 };
+  }
+}
+
 /** Number of chains between state saves (avoids excessive I/O) */
 const STATE_SAVE_INTERVAL = 10;
 
@@ -235,6 +365,7 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
     chainsProcessed: 0,
     chainsSkipped: 0,
     relationsCreated: 0,
+    explorationRelationsCreated: 0,
     errors: [],
   };
 
@@ -367,6 +498,124 @@ export async function runLinker(opts: LinkOptions = {}): Promise<LinkResult> {
   // Final state flush to capture any remaining unwritten progress
   if (result.chainsProcessed > 0) {
     saveState(state);
+  }
+
+  // ---- Exploration pass: discover cross-domain analogies ----
+  if (opts.explore) {
+    const exploredSet = new Set(state.exploredChainIds);
+    const explorationTopK = 5;
+    // Lower similarity floor, we'll cap at the regular threshold to avoid overlap
+    const explorationFloor = 0.25;
+    const explorationCeiling = threshold; // typically 0.5
+
+    // Only explore chains that have been linked (have embeddings and relations)
+    // but haven't been explored yet
+    const toExplore = allChains.filter((c) => !exploredSet.has(c.id));
+    const exploreSlice = opts.limit ? toExplore.slice(0, opts.limit) : toExplore;
+    const exploreTotal = exploreSlice.length;
+
+    for (let i = 0; i < exploreSlice.length; i++) {
+      const chain = exploreSlice[i]!;
+
+      // Find candidates in the "interesting but not obvious" similarity zone
+      const candidates = await storage.searchReasoning({
+        queryEmbedding: chain.embedding,
+        userId: LOCAL_USER_ID,
+        matchThreshold: explorationFloor,
+        limit: explorationTopK + 10, // fetch extra so we have enough after filtering
+      });
+
+      // Filter to the exploration zone: similarity in [floor, ceiling)
+      // Also exclude self-matches
+      const explorationCandidates = candidates.filter(
+        (c) => c.id !== chain.id && c.similarity < explorationCeiling
+      );
+
+      // Pre-load existing relations for dedup
+      const existingRelations = await storage.getRelatedChains({
+        chainId: chain.id,
+        limit: 200,
+      });
+      const alreadyLinkedIds = new Set(existingRelations.map((r) => r.chainId));
+
+      let relationsForChain = 0;
+
+      // Take only top-K from the filtered set
+      for (const candidate of explorationCandidates.slice(0, explorationTopK)) {
+        // Dedup: sorted pair key
+        const pairKey = [chain.id, candidate.id].sort().join(":");
+        if (processedPairs.has(pairKey)) continue;
+        processedPairs.add(pairKey);
+
+        // Skip already-linked pairs
+        if (alreadyLinkedIds.has(candidate.id)) continue;
+
+        const candidateChain = chainMap.get(candidate.id);
+        if (!candidateChain) continue;
+
+        try {
+          const classification = await classifyPairForAnalogy(chain, candidateChain, opts.ollamaOptions);
+
+          if (
+            classification.relation === "analogous_to" &&
+            classification.confidence >= MIN_EXPLORATION_CONFIDENCE
+          ) {
+            // Insert bidirectional analogy relation
+            const relations: ChainRelation[] = [
+              {
+                sourceChainId: chain.id,
+                targetChainId: candidate.id,
+                relationType: "analogous_to",
+                confidence: classification.confidence,
+              },
+              {
+                sourceChainId: candidate.id,
+                targetChainId: chain.id,
+                relationType: "analogous_to",
+                confidence: classification.confidence,
+              },
+            ];
+
+            await storage.insertChainRelations(relations);
+            relationsForChain += relations.length;
+            result.relationsCreated += relations.length;
+            result.explorationRelationsCreated += relations.length;
+          }
+
+          // Rate limit
+          if (delayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          result.errors.push(`Explore ${chain.id.slice(0, 8)} ↔ ${candidate.id.slice(0, 8)}: ${msg}`);
+        }
+      }
+
+      // Mark chain as explored
+      state.exploredChainIds.push(chain.id);
+      exploredSet.add(chain.id);
+
+      // Save state periodically
+      if ((i + 1) % STATE_SAVE_INTERVAL === 0) {
+        saveState(state);
+      }
+
+      // Report progress
+      opts.onProgress?.({
+        current: i + 1,
+        total: exploreTotal,
+        chainId: chain.id,
+        candidatesFound: explorationCandidates.length,
+        relationsCreated: relationsForChain,
+        exploration: true,
+      });
+    }
+
+    // Final exploration state flush
+    if (exploreSlice.length > 0) {
+      saveState(state);
+    }
   }
 
   return result;

@@ -7,6 +7,8 @@ import type {
   TimelineOpts,
   GetRelatedChainsOpts,
   ListChainsWithEmbeddingsOpts,
+  DriftWalkOpts,
+  SpreadActivationOpts,
 } from "./provider.ts";
 import type {
   ChainRelation,
@@ -22,6 +24,8 @@ import type {
   SessionChunk,
   SessionListEntry,
   TimelineEntry,
+  DriftResult,
+  ActivatedChain,
 } from "../config/types.ts";
 
 /**
@@ -481,5 +485,15 @@ export class SupabaseStorageProvider implements StorageProvider {
   async decayUnusedChains(_olderThanDays: number, _decayFactor: number): Promise<number> {
     // Cloud-side decay should be handled by a Supabase Edge Function or cron job
     throw new Error("decayUnusedChains is not supported in cloud mode. Use a server-side cron job instead.");
+  }
+
+  async driftWalk(_opts: DriftWalkOpts): Promise<DriftResult> {
+    // TODO: Implement cloud-side drift walk via Supabase RPC
+    throw new Error("driftWalk is not yet supported in cloud mode.");
+  }
+
+  async spreadActivation(_opts: SpreadActivationOpts): Promise<ActivatedChain[]> {
+    // TODO: Implement cloud-side spreading activation via Supabase RPC
+    throw new Error("spreadActivation is not yet supported in cloud mode.");
   }
 }
