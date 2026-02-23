@@ -508,6 +508,7 @@ export class PGliteStorageProvider implements StorageProvider {
     // Salience: log-scaled recall_count + reference_count * 2, normalized to 0-1 range via
     //   LN(1 + recall_count + reference_count * 2) / LN(1 + max_salience_across_all_chains)
     //   reference_count weighted 2x because being referenced is a stronger structural signal
+    // Max salience is computed once via CTE (not per-row subquery)
     const result = await db.query<{
       id: string;
       session_id: string | null;
@@ -528,7 +529,11 @@ export class PGliteStorageProvider implements StorageProvider {
       reference_count: number;
       created_at: string;
     }>(
-      `SELECT
+      `WITH max_sal AS (
+         SELECT GREATEST(LN(1 + COALESCE(MAX(COALESCE(recall_count,0) + COALESCE(reference_count,0) * 2), 0)), 1.0) AS val
+         FROM reasoning_chains
+       )
+       SELECT
          rc.id,
          rc.session_id,
          rc.type,
@@ -545,7 +550,7 @@ export class PGliteStorageProvider implements StorageProvider {
            + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.0005)) * $${wRecIdx}
            + CASE WHEN $${wSalIdx}::float > 0 THEN
                LN(1 + COALESCE(rc.recall_count, 0) + COALESCE(rc.reference_count, 0) * 2)
-               / GREATEST(LN(1 + COALESCE((SELECT MAX(COALESCE(recall_count,0) + COALESCE(reference_count,0) * 2) FROM reasoning_chains), 0)), 1.0)
+               / (SELECT val FROM max_sal)
                * $${wSalIdx}::float
              ELSE 0 END
          AS score,
@@ -711,14 +716,18 @@ export class PGliteStorageProvider implements StorageProvider {
   async insertChainRelation(relation: ChainRelation): Promise<string> {
     const db = await this.getDb();
 
-    const result = await db.query<{ id: string }>(
+    // Use xmax = 0 to detect true inserts vs conflict updates.
+    // xmax = 0 means the row was freshly inserted (no previous version existed).
+    const result = await db.query<{ id: string; xmax: number }>(
       `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type, confidence)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (source_chain_id, target_chain_id, relation_type)
        DO UPDATE SET relation_type = EXCLUDED.relation_type, confidence = COALESCE(EXCLUDED.confidence, chain_relations.confidence)
-       RETURNING id`,
+       RETURNING id, xmax::int`,
       [relation.sourceChainId, relation.targetChainId, relation.relationType, relation.confidence ?? null]
     );
+
+    const wasInserted = result.rows[0]!.xmax === 0;
 
     // Auto-archive: when a 'supersedes' relation is created, mark the target as superseded
     if (relation.relationType === "supersedes") {
@@ -728,9 +737,9 @@ export class PGliteStorageProvider implements StorageProvider {
       );
     }
 
-    // Increment reference_count on target for knowledge-building relations
-    const referenceRelations = ["builds_on", "refines", "depends_on"];
-    if (referenceRelations.includes(relation.relationType)) {
+    // Increment reference_count on target only for NEW relations (not re-upserts)
+    const referenceRelations = ["builds_on", "refines", "depends_on", "analogous_to"];
+    if (wasInserted && referenceRelations.includes(relation.relationType)) {
       await db.query(
         `UPDATE reasoning_chains SET reference_count = COALESCE(reference_count, 0) + 1 WHERE id = $1`,
         [relation.targetChainId]
@@ -755,14 +764,18 @@ export class PGliteStorageProvider implements StorageProvider {
       params.push(relation.sourceChainId, relation.targetChainId, relation.relationType, relation.confidence ?? null);
     }
 
-    const result = await db.query<{ id: string }>(
+    // Use xmax::int to detect true inserts (xmax = 0) vs conflict updates
+    const result = await db.query<{ id: string; xmax: number; target_chain_id: string; relation_type: string }>(
       `INSERT INTO chain_relations (source_chain_id, target_chain_id, relation_type, confidence)
        VALUES ${valueClauses.join(", ")}
        ON CONFLICT (source_chain_id, target_chain_id, relation_type)
        DO UPDATE SET relation_type = EXCLUDED.relation_type, confidence = COALESCE(EXCLUDED.confidence, chain_relations.confidence)
-       RETURNING id`,
+       RETURNING id, xmax::int, target_chain_id, relation_type`,
       params
     );
+
+    // Build a set of newly inserted relation rows
+    const newlyInserted = result.rows.filter((r) => r.xmax === 0);
 
     // Auto-archive: mark targets of 'supersedes' relations as superseded
     const supersededTargets = relations
@@ -777,11 +790,11 @@ export class PGliteStorageProvider implements StorageProvider {
       );
     }
 
-    // Increment reference_count on targets of knowledge-building relations
-    const referenceRelations = ["builds_on", "refines", "depends_on"];
-    const referenceTargets = relations
-      .filter((r) => referenceRelations.includes(r.relationType))
-      .map((r) => r.targetChainId);
+    // Increment reference_count on targets only for NEWLY INSERTED relations
+    const referenceRelations = ["builds_on", "refines", "depends_on", "analogous_to"];
+    const referenceTargets = newlyInserted
+      .filter((r) => referenceRelations.includes(r.relation_type))
+      .map((r) => r.target_chain_id);
 
     if (referenceTargets.length > 0) {
       // Deduplicate targets and count occurrences

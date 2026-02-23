@@ -461,13 +461,26 @@ server.registerTool(
   async (input) => {
     const { userId, storage } = await ensureReady();
 
-    const result = await storage.driftWalk({
-      userId,
-      seedChainId: input.seed_chain_id,
-      steps: input.steps,
-      temperature: input.temperature,
-      project: input.project,
-    });
+    let result;
+    try {
+      result = await storage.driftWalk({
+        userId,
+        seedChainId: input.seed_chain_id,
+        steps: input.steps,
+        temperature: input.temperature,
+        project: input.project,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Drift walk failed: ${message}`,
+          },
+        ],
+      };
+    }
 
     if (result.steps.length === 0) {
       return {

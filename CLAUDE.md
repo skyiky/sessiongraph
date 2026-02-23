@@ -43,7 +43,7 @@ Chains connect via `chain_relations` table with 8 relation types: `leads_to`, `s
 
 Emergent creativity features inspired by how human memory works through stochastic associative retrieval.
 
-**Salience-weighted ranking:** `recall_count` and `reference_count` influence search results via the `salience` weight component. Log-scaled: `log(1 + recall_count + reference_count * 2) / log(20)`. The `creative` preset sets salience to 0.30, reducing vector similarity to 0.35.
+**Salience-weighted ranking:** `recall_count` and `reference_count` influence search results via the `salience` weight component. Log-scaled: `log(1 + recall_count + reference_count * 2)`, normalized to 0-1 by dividing by the max salience across all chains (computed once via CTE). The `creative` preset sets salience to 0.30, reducing vector similarity to 0.35. `reference_count` is incremented when a chain is the target of a `builds_on`, `refines`, `depends_on`, or `analogous_to` relation (only for newly created relations, not re-upserts).
 
 **Drift walk (`driftWalk`):** Stochastic random walk through the reasoning graph. At each step, selects the next chain by softmax-sampling outgoing edges weighted by confidence, with temperature controlling stochasticity. Includes a teleportation mechanism (probability ~0.3) that jumps to embedding-similar but unconnected chains (similarity 0.2-0.6 zone), simulating loose neural associations. MCP tool: `drift`.
 

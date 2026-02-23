@@ -130,12 +130,13 @@ function loadState(): LinkState {
   try {
     const raw = readFileSync(statePath, "utf-8");
     const parsed = JSON.parse(raw) as LinkState;
+    // Deduplicate on load to compact state files that grew from repeated runs
     return {
       linkedChainIds: Array.isArray(parsed.linkedChainIds)
-        ? parsed.linkedChainIds
+        ? [...new Set(parsed.linkedChainIds)]
         : [],
       exploredChainIds: Array.isArray(parsed.exploredChainIds)
-        ? parsed.exploredChainIds
+        ? [...new Set(parsed.exploredChainIds)]
         : [],
     };
   } catch {
