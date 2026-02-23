@@ -1,12 +1,23 @@
 # SessionGraph Roadmap
 
-> Last updated: 2026-02-21
+> Last updated: 2026-02-22
 
 What's shipped is documented in [CLAUDE.md](../CLAUDE.md). This file covers what's next.
 
 ---
 
-## Phase 2: Multi-Tool & Polish (v0.3)
+## Shipped
+
+### Phase 2 (v0.3) — completed items
+
+- **2.3 Chain Quality Scoring** — `quality` field (0-1) on `reasoning_chains`. MCP capture = 1.0, backfill = 0.6. Blended into search ranking.
+- **2.4 CLI Polish** — `search` with colors, `stats`, `export` to JSON/Markdown.
+- **Core Overhaul** — Hybrid search (vector + full-text), chain metadata (project, source, status, context), multi-hop graph traversal (depth 1-3), auto-archive via `supersedes` relation.
+- **PGlite Resilience** — Filesystem lock prevents concurrent access, corruption detection with recovery instructions, hardened MCP shutdown handlers.
+
+---
+
+## Phase 2: Multi-Tool & Polish (v0.3) — remaining
 
 ### 2.1 Aider Parser
 - Data source: `.aider.chat.history.md` per project directory
@@ -15,17 +26,6 @@ What's shipped is documented in [CLAUDE.md](../CLAUDE.md). This file covers what
 ### 2.2 Cross-Tool Unified Timeline
 - `recall` and `timeline` search across all tools seamlessly
 - "Last week I used Claude Code on project X and OpenCode on project Y" — one search finds both
-
-### 2.3 Chain Quality Scoring
-- Not all chains are equal. Backfill chains < real-time agent chains.
-- Add a `quality` field (0-1) to `reasoning_chains`
-- Real-time capture = 1.0, Ollama backfill = 0.6, regex legacy = 0.2
-- Search results weighted by quality — higher quality chains rank higher at equal similarity
-
-### 2.4 CLI Polish
-- `sessiongraph search` with rich terminal output (colors, formatting)
-- `sessiongraph stats` — chain count by type, sessions by tool, storage size
-- `sessiongraph export` — dump reasoning chains to JSON/Markdown
 
 ### 2.5 Cursor Parser (Stretch)
 - Data source: SQLite in VS Code workspace storage
