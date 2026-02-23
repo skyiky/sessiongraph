@@ -2,6 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
 import { join } from "path";
 import { config, ensureDataDir } from "../config/config.ts";
+import { acquireLock } from "./lockfile.ts";
 import type {
   StorageProvider,
   ListSessionsOpts,
@@ -61,6 +62,7 @@ function toVectorLiteral(embedding: number[]): string {
 export class PGliteStorageProvider implements StorageProvider {
   readonly mode = "local" as const;
   private db: PGlite | null = null;
+  private releaseLock: (() => void) | null = null;
 
   private async getDb(): Promise<PGlite> {
     if (this.db) return this.db;
@@ -72,14 +74,25 @@ export class PGliteStorageProvider implements StorageProvider {
 
     ensureDataDir();
     const dataDir = join(config.paths.dataDir, "pglite");
+    const lockPath = join(config.paths.dataDir, "pglite.lock");
 
-    this.db = await PGlite.create({
-      dataDir,
-      extensions: { vector },
-    });
+    // Acquire exclusive lock before opening the database
+    this.releaseLock = acquireLock(lockPath);
 
-    await this.db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
-    await this.initSchema();
+    try {
+      this.db = await PGlite.create({
+        dataDir,
+        extensions: { vector },
+      });
+
+      await this.db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
+      await this.initSchema();
+    } catch (err: unknown) {
+      // Release lock if initialization fails
+      this.releaseLock?.();
+      this.releaseLock = null;
+      throw err;
+    }
   }
 
   async close(): Promise<void> {
@@ -87,6 +100,8 @@ export class PGliteStorageProvider implements StorageProvider {
       await this.db.close();
       this.db = null;
     }
+    this.releaseLock?.();
+    this.releaseLock = null;
   }
 
   private async initSchema(): Promise<void> {
