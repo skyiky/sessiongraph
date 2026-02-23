@@ -8,8 +8,8 @@ import {
   type StorageProvider,
   type EmbeddingProvider,
 } from "../storage/provider.ts";
-import { REASONING_TYPES, RELATION_TYPES, BIDIRECTIONAL_RELATIONS } from "../config/types.ts";
-import type { RelationType, ChainSource } from "../config/types.ts";
+import { REASONING_TYPES, RELATION_TYPES, BIDIRECTIONAL_RELATIONS, SEARCH_WEIGHT_PRESETS } from "../config/types.ts";
+import type { RelationType, ChainSource, ChainStatus, SearchWeights } from "../config/types.ts";
 import { config } from "../config/config.ts";
 import { loadAuth } from "../auth/auth.ts";
 import { readFileSync, existsSync } from "fs";
@@ -156,10 +156,25 @@ server.registerTool(
       project: z.string().optional().describe("Filter to a specific project"),
       type: z.enum(REASONING_TYPES).optional().describe("Filter by reasoning type"),
       limit: z.number().default(5).describe("Maximum number of results to return"),
+      weights: z.object({
+        vectorSimilarity: z.number().optional().describe("Weight for vector similarity (default: 0.55)"),
+        textMatch: z.number().optional().describe("Weight for text match (default: 0.15)"),
+        quality: z.number().optional().describe("Weight for quality score (default: 0.15)"),
+        recency: z.number().optional().describe("Weight for recency (default: 0.15)"),
+      }).optional().describe("Custom search ranking weights. Use preset 'agentCognition' for durable mental models (quality=0.30, recency=0.10)."),
+      weightPreset: z.enum(["default", "agentCognition", "recentFirst", "qualityFirst"]).optional().describe("Use a preset weight profile instead of custom weights"),
     }),
   },
   async (input) => {
     const { userId, storage, embeddings } = await ensureReady();
+
+    // Resolve weights: explicit > preset > default
+    let resolvedWeights: SearchWeights | undefined;
+    if (input.weights) {
+      resolvedWeights = input.weights;
+    } else if (input.weightPreset) {
+      resolvedWeights = SEARCH_WEIGHT_PRESETS[input.weightPreset];
+    }
 
     // Generate embedding for the query
     const queryEmbedding = await embeddings.generateEmbedding(input.query);
@@ -171,7 +186,13 @@ server.registerTool(
       project: input.project,
       matchThreshold: 0.3,
       limit: input.limit,
+      weights: resolvedWeights,
     });
+
+    // Touch recalled chains to track reinforcement signal
+    if (results.length > 0) {
+      await storage.touchChains(results.map((r) => r.id));
+    }
 
     if (results.length === 0) {
       return {
@@ -190,10 +211,13 @@ server.registerTool(
           `## ${i + 1}. [${r.type.toUpperCase()}] ${r.title}\n` +
           `ID: ${r.id}\n` +
           `Score: ${(r.score * 100).toFixed(1)}% | Similarity: ${(r.similarity * 100).toFixed(1)}% | Quality: ${(r.quality * 100).toFixed(0)}%\n` +
+          (r.recallCount ? `Recalls: ${r.recallCount} | ` : "") +
+          (r.referenceCount ? `References: ${r.referenceCount} | ` : "") +
           (r.project ? `Project: ${r.project}\n` : "") +
           (r.source ? `Source: ${r.source}\n` : "") +
           `${r.content}\n` +
           (r.tags.length > 0 ? `Tags: ${r.tags.join(", ")}\n` : "") +
+          (r.metadata && Object.keys(r.metadata).length > 0 ? `Metadata: ${JSON.stringify(r.metadata)}\n` : "") +
           `Date: ${r.createdAt}`
       )
       .join("\n\n---\n\n");
@@ -376,6 +400,60 @@ server.registerTool(
         {
           type: "text" as const,
           text: `Found ${results.length} related chain(s) for ${input.chain_id}:\n\n${formatted}`,
+        },
+      ],
+    };
+  }
+);
+
+// ---- Tool: update_chain ----
+server.registerTool(
+  "update_chain",
+  {
+    description:
+      "Update mutable fields on an existing reasoning chain. Use this to update tags, quality, metadata, or status. Useful for tracking prediction outcomes, adding structured data, or manually adjusting chain quality.",
+    inputSchema: z.object({
+      chain_id: z.string().uuid().describe("The ID of the reasoning chain to update"),
+      tags: z.array(z.string()).optional().describe("Replace the chain's tags with these new tags"),
+      quality: z.number().min(0).max(1).optional().describe("Set the chain's quality score (0-1)"),
+      status: z.enum(["active", "superseded"]).optional().describe("Set the chain's lifecycle status"),
+      metadata: z.record(z.string(), z.unknown()).optional().describe("Set or replace the chain's structured metadata (e.g. prediction state, deadlines)"),
+    }),
+  },
+  async (input) => {
+    const { storage } = await ensureReady();
+
+    const updates: {
+      tags?: string[];
+      quality?: number;
+      metadata?: Record<string, unknown>;
+      status?: ChainStatus;
+    } = {};
+
+    if (input.tags !== undefined) updates.tags = input.tags;
+    if (input.quality !== undefined) updates.quality = input.quality;
+    if (input.metadata !== undefined) updates.metadata = input.metadata;
+    if (input.status !== undefined) updates.status = input.status;
+
+    if (Object.keys(updates).length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "No updates provided. Specify at least one field to update (tags, quality, status, or metadata).",
+          },
+        ],
+      };
+    }
+
+    await storage.updateChain(input.chain_id, updates);
+
+    const updatedFields = Object.keys(updates).join(", ");
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Updated chain ${input.chain_id}: ${updatedFields}`,
         },
       ],
     };

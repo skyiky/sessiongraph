@@ -1,5 +1,30 @@
 # SessionGraph - Key Concepts
 
+## ELI5: How SessionGraph Works
+
+When you use an AI coding assistant (like OpenCode or Claude Code), you have conversations where the AI makes decisions, solves problems, and learns things about your codebase. Once the conversation ends, all of that reasoning disappears. SessionGraph saves it.
+
+**The core loop is three steps:**
+
+1. **Capture** -- While you're coding with an AI, a background skill silently watches for important reasoning (decisions, insights, rejected approaches) and sends each one to SessionGraph via an MCP tool call (`remember`).
+
+2. **Store** -- SessionGraph converts the reasoning text into a vector (a list of 1024 numbers that encode its meaning), then stores both the text and the vector in an embedded Postgres database (PGlite) on your machine. No cloud, no account needed.
+
+3. **Search** -- Later, when you or the AI asks "why did we do X?" or "have we solved this before?", SessionGraph converts the question into a vector too, then finds stored reasoning whose vectors are closest in meaning. This is semantic search -- it works even when no keywords match.
+
+**That's it.** Everything else in the project supports these three steps:
+
+- **Backfill** extracts reasoning from old sessions you had before installing SessionGraph (uses a local LLM via Ollama).
+- **Linking** discovers connections between reasoning chains (e.g. "this decision led to that insight") and builds a graph of relationships.
+- **Consolidation** merges clusters of related chains into dense summaries so the knowledge base stays manageable as it grows.
+- **The MCP server** is how AI tools talk to SessionGraph (stdio protocol, 9 tools).
+- **The HTTP API** is how external programs (like a Python agent) talk to SessionGraph (REST on port 3272).
+- **Quality scoring** tracks which chains get recalled frequently and lets unused ones decay, so search results stay relevant.
+
+The database stores everything locally at `~/.sessiongraph/pglite/`. Cross-project search works out of the box -- insights from one repo can surface while working in another.
+
+---
+
 ## What is an Embedding?
 
 An embedding is a list of numbers (a vector) that represents the **meaning** of a piece of text. For example:

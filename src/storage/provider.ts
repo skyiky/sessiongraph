@@ -5,10 +5,12 @@ import type {
   RecallResult,
   RelatedChainResult,
   RelationType,
+  SearchWeights,
   Session,
   SessionChunk,
   SessionListEntry,
   TimelineEntry,
+  ChainStatus,
 } from "../config/types.ts";
 
 // ---- Storage Provider Interface ----
@@ -29,6 +31,7 @@ export interface SearchReasoningOpts {
   matchThreshold?: number;
   limit?: number;
   includeSuperseded?: boolean; // Include chains with status='superseded' (default: false)
+  weights?: SearchWeights; // Custom ranking weights (default: SEARCH_WEIGHT_PRESETS.default)
 }
 
 export interface TimelineOpts {
@@ -87,6 +90,21 @@ export interface StorageProvider {
   // ---- Batch / Linking ----
   /** List chains that have embeddings, paginated. Used by the auto-linker. */
   listChainsWithEmbeddings(opts: ListChainsWithEmbeddingsOpts): Promise<ChainWithEmbedding[]>;
+
+  // ---- Dynamic Quality & Chain Mutation ----
+  /** Increment recall_count and set last_recalled_at for chains that were retrieved. */
+  touchChains(chainIds: string[]): Promise<void>;
+
+  /** Update mutable fields on an existing chain (tags, quality, metadata, status). */
+  updateChain(chainId: string, updates: {
+    tags?: string[];
+    quality?: number;
+    metadata?: Record<string, unknown>;
+    status?: ChainStatus;
+  }): Promise<void>;
+
+  /** Decay quality for chains not recalled within the given number of days. */
+  decayUnusedChains(olderThanDays: number, decayFactor: number): Promise<number>;
 }
 
 // ---- Embedding Provider Interface ----

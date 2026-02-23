@@ -19,7 +19,7 @@ export type RelationType = (typeof RELATION_TYPES)[number];
 export const BIDIRECTIONAL_RELATIONS: readonly RelationType[] = ["contradicts", "analogous_to"];
 
 // Chain source — how a chain was created
-export const CHAIN_SOURCES = ["mcp_capture", "backfill", "agent_backfill"] as const;
+export const CHAIN_SOURCES = ["mcp_capture", "backfill", "agent_backfill", "agent"] as const;
 export type ChainSource = (typeof CHAIN_SOURCES)[number];
 
 // Chain status — lifecycle state
@@ -75,6 +75,10 @@ export interface ReasoningChain {
   project?: string; // Direct project association (independent of session)
   source?: ChainSource; // How this chain was created
   status?: ChainStatus; // Lifecycle state (active, superseded)
+  metadata?: Record<string, unknown>; // Arbitrary structured data (predictions, agent state, etc.)
+  recallCount?: number; // How many times this chain has been recalled (reinforcement signal)
+  lastRecalledAt?: Date; // When this chain was last recalled
+  referenceCount?: number; // How many other chains reference this one (builds_on, refines, depends_on)
   createdAt?: Date;
 }
 
@@ -146,8 +150,27 @@ export interface RecallResult {
   project?: string;
   source?: ChainSource;
   status?: ChainStatus;
+  metadata?: Record<string, unknown>;
+  recallCount?: number;
+  referenceCount?: number;
   createdAt: string;
 }
+
+// Configurable weights for hybrid search ranking
+export interface SearchWeights {
+  vectorSimilarity?: number; // Weight for cosine similarity (default: 0.55)
+  textMatch?: number; // Weight for full-text search match (default: 0.15)
+  quality?: number; // Weight for quality score (default: 0.15)
+  recency?: number; // Weight for recency (default: 0.15)
+}
+
+// Preset weight profiles for different use cases
+export const SEARCH_WEIGHT_PRESETS = {
+  default: { vectorSimilarity: 0.55, textMatch: 0.15, quality: 0.15, recency: 0.15 } as SearchWeights,
+  agentCognition: { vectorSimilarity: 0.45, textMatch: 0.15, quality: 0.30, recency: 0.10 } as SearchWeights,
+  recentFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.10, recency: 0.45 } as SearchWeights,
+  qualityFirst: { vectorSimilarity: 0.35, textMatch: 0.10, quality: 0.45, recency: 0.10 } as SearchWeights,
+} as const;
 
 export interface TimelineEntry {
   sessionId: string;

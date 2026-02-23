@@ -441,4 +441,45 @@ export class SupabaseStorageProvider implements StorageProvider {
       embedding: r.embedding,
     }));
   }
+
+  // ---- Dynamic Quality & Chain Mutation (stubs for cloud provider) ----
+
+  async touchChains(chainIds: string[]): Promise<void> {
+    if (chainIds.length === 0) return;
+    const client = this.getClient();
+
+    // Supabase doesn't support bulk increment natively, so loop
+    for (const id of chainIds) {
+      await client.rpc("touch_chain", { chain_id: id });
+    }
+  }
+
+  async updateChain(chainId: string, updates: {
+    tags?: string[];
+    quality?: number;
+    metadata?: Record<string, unknown>;
+    status?: import("../config/types.ts").ChainStatus;
+  }): Promise<void> {
+    const client = this.getClient();
+
+    const updateObj: Record<string, unknown> = {};
+    if (updates.tags !== undefined) updateObj.tags = updates.tags;
+    if (updates.quality !== undefined) updateObj.quality = updates.quality;
+    if (updates.metadata !== undefined) updateObj.metadata = updates.metadata;
+    if (updates.status !== undefined) updateObj.status = updates.status;
+
+    if (Object.keys(updateObj).length === 0) return;
+
+    const { error } = await client
+      .from("reasoning_chains")
+      .update(updateObj)
+      .eq("id", chainId);
+
+    if (error) throw new Error(`Failed to update chain: ${error.message}`);
+  }
+
+  async decayUnusedChains(_olderThanDays: number, _decayFactor: number): Promise<number> {
+    // Cloud-side decay should be handled by a Supabase Edge Function or cron job
+    throw new Error("decayUnusedChains is not supported in cloud mode. Use a server-side cron job instead.");
+  }
 }

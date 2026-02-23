@@ -478,6 +478,78 @@ program
     await resetProviders();
   });
 
+// ---- Consolidate (cluster + synthesize related chains) ----
+
+program
+  .command("consolidate")
+  .description("Consolidate related reasoning chains into dense summaries using Ollama")
+  .option("--min-cluster-size <number>", "Minimum chains in a cluster to consolidate (default: 3)", "3")
+  .option("-p, --project <project>", "Only consolidate chains in this project")
+  .option("-d, --delay <seconds>", "Delay between Ollama synthesis calls in seconds (default: 1)", "1")
+  .option("--dry-run", "Show what would happen without writing anything")
+  .option("--threads <number>", "Limit CPU threads for Ollama inference")
+  .option("--cpu-only", "Run on CPU only (no GPU)")
+  .action(async (opts) => {
+    const delayMs = parsePositiveNumber(opts.delay, "delay") * 1000;
+    const minClusterSize = parsePositiveInt(opts.minClusterSize, "min-cluster-size");
+
+    const ollamaOptions: Record<string, number> = {};
+    if (opts.threads) {
+      ollamaOptions.numThread = parsePositiveInt(opts.threads, "threads");
+    }
+    if (opts.cpuOnly) ollamaOptions.numGpu = 0;
+
+    console.log("Starting consolidation...");
+    console.log(`  Min cluster size: ${minClusterSize}`);
+    console.log(`  Delay: ${opts.delay}s between synthesis calls`);
+    if (opts.project) console.log(`  Project: ${opts.project}`);
+    if (opts.dryRun) console.log(`  Mode: DRY RUN (no writes)`);
+    if (opts.threads) console.log(`  CPU threads: ${opts.threads}`);
+    if (opts.cpuOnly) console.log(`  Mode: CPU-only (no GPU)`);
+
+    const startTime = Date.now();
+
+    const { consolidate } = await import("./consolidation/consolidator.ts");
+
+    const result = await consolidate({
+      minClusterSize,
+      project: opts.project,
+      delayMs,
+      dryRun: opts.dryRun,
+      ollamaOptions: Object.keys(ollamaOptions).length > 0 ? ollamaOptions : undefined,
+      onProgress: (progress) => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        switch (progress.phase) {
+          case "scanning":
+            process.stdout.write(`\r\x1b[K[${progress.phase}] ${progress.detail ?? ""} [${elapsed}s]`);
+            break;
+          case "clustering":
+            process.stdout.write(`\r\x1b[K[${progress.phase}] ${progress.detail ?? ""} [${elapsed}s]\n`);
+            break;
+          case "synthesizing":
+            process.stdout.write(`\r\x1b[K[${progress.phase}] ${progress.current}/${progress.total} | ${progress.detail ?? ""} [${elapsed}s]`);
+            break;
+          case "inserting":
+            process.stdout.write(`\r\x1b[K[${progress.phase}] ${progress.current}/${progress.total} | ${progress.detail ?? ""} [${elapsed}s]\n`);
+            break;
+        }
+      },
+    });
+
+    const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\nDone in ${totalElapsed}s!`);
+    console.log(`  Clusters found: ${result.clustersFound}`);
+    console.log(`  Clusters synthesized: ${result.clustersSynthesized}`);
+    console.log(`  Chains consolidated: ${result.chainsConsolidated}`);
+    console.log(`  Chains created: ${result.chainsCreated}`);
+    if (result.errors.length > 0) {
+      console.log(`  ${result.errors.length} error(s):`);
+      for (const err of result.errors.slice(0, 5)) console.log(`    - ${err}`);
+    }
+
+    await resetProviders();
+  });
+
 // ---- Stats ----
 
 program
@@ -586,6 +658,99 @@ program
     await resetProviders();
   });
 
+// ---- Benchmark ----
+
+program
+  .command("benchmark")
+  .description("Run data quality benchmark across four pillars")
+  .option("-s, --sample <number>", "Chains to sample for search test (default: 50)", "50")
+  .option("--skip-search", "Skip search quality pillar (avoids Ollama dependency)")
+  .option("--json", "Output raw JSON instead of formatted report")
+  .option("--db-path <path>", "Path to PGlite data directory (default: copy of live DB)")
+  .action(async (opts) => {
+    if (config.storage.mode !== "local") {
+      console.error("Error: Benchmark currently supports local mode (PGlite) only.");
+      process.exit(1);
+    }
+
+    const sample = parsePositiveInt(opts.sample, "sample");
+    const skipSearch = opts.skipSearch ?? false;
+    const jsonOutput = opts.json ?? false;
+
+    // Determine PGlite data dir — use provided path, or copy live DB to temp dir
+    // to avoid locking conflicts with running MCP server.
+    let dataDir: string;
+    let tempCopy = false;
+
+    if (opts.dbPath) {
+      dataDir = opts.dbPath;
+    } else {
+      const { join } = await import("node:path");
+      const liveDir = join(config.paths.dataDir, "pglite");
+      const tmpDir = join(config.paths.dataDir, "pglite-benchmark-tmp");
+
+      if (!jsonOutput) console.log(dim("  Copying database for benchmark (avoids lock conflicts)..."));
+
+      // Remove old temp copy if exists, then copy
+      const { cpSync, rmSync, existsSync } = await import("node:fs");
+      if (existsSync(tmpDir)) {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+      cpSync(liveDir, tmpDir, { recursive: true });
+      dataDir = tmpDir;
+      tempCopy = true;
+    }
+
+    // Try to get StorageProvider and EmbeddingProvider for search/duplicate tests
+    // These may fail if the live DB is locked, which is fine — we'll skip those tests
+    let storage = null;
+    let embeddings = null;
+
+    if (!skipSearch) {
+      try {
+        storage = await getStorageProvider();
+        embeddings = await getEmbeddingProvider();
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!jsonOutput) {
+          console.log(dim(`  Note: Could not access live DB for search tests: ${message}`));
+          console.log(dim("  Running without search quality and duplicate detection."));
+        }
+      }
+    }
+
+    const { runBenchmark, formatReport } = await import("./benchmark/index.ts");
+
+    try {
+      const result = await runBenchmark(
+        dataDir,
+        storage,
+        embeddings,
+        { sample, skipSearch: skipSearch || !embeddings, json: jsonOutput },
+        (step) => {
+          if (!jsonOutput) console.log(dim(`  ${step}`));
+        },
+      );
+
+      if (jsonOutput) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatReport(result));
+      }
+    } finally {
+      // Clean up temp copy
+      if (tempCopy) {
+        try {
+          const { rmSync } = await import("node:fs");
+          rmSync(dataDir, { recursive: true, force: true });
+        } catch {
+          // Best effort cleanup
+        }
+      }
+      await resetProviders();
+    }
+  });
+
 // ---- Export ----
 
 program
@@ -691,6 +856,21 @@ program
   .description("Start the MCP server (for AI tool integration)")
   .action(async () => {
     await import("./mcp/server.ts");
+  });
+
+// ---- Serve (HTTP API) ----
+
+program
+  .command("serve")
+  .description("Start the HTTP API server (for external integrations)")
+  .option("--port <number>", "Port to listen on (default: 3272, or SESSIONGRAPH_API_PORT env var)")
+  .action(async (opts) => {
+    // Set port via env var so the server module picks it up
+    if (opts.port) {
+      const port = parsePositiveInt(opts.port, "port");
+      process.env.SESSIONGRAPH_API_PORT = String(port);
+    }
+    await import("./api/server.ts");
   });
 
 // ---- Sync (cloud-only) ----

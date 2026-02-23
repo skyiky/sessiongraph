@@ -24,7 +24,9 @@ import type {
   TimelineEntry,
   ChainSource,
   ChainStatus,
+  SearchWeights,
 } from "../config/types.ts";
+import { SEARCH_WEIGHT_PRESETS } from "../config/types.ts";
 
 /** Fixed user ID for local single-user mode. Keeps schema compatible with cloud sync. */
 const LOCAL_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -202,6 +204,20 @@ export class PGliteStorageProvider implements StorageProvider {
     await db.exec(`
       ALTER TABLE chain_relations ADD COLUMN IF NOT EXISTS confidence REAL;
     `);
+
+    // v0.5 schema upgrade: dynamic quality signals + metadata (Aegis extensions)
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+    `);
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS recall_count INTEGER DEFAULT 0;
+    `);
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS last_recalled_at TIMESTAMPTZ;
+    `);
+    await db.exec(`
+      ALTER TABLE reasoning_chains ADD COLUMN IF NOT EXISTS reference_count INTEGER DEFAULT 0;
+    `);
   }
 
   // ---- Sessions ----
@@ -305,8 +321,8 @@ export class PGliteStorageProvider implements StorageProvider {
       : null;
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10, $11, $12)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10, $11, $12, $13)
        RETURNING id`,
       [
         chain.sessionId ?? null,
@@ -321,6 +337,7 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.project ?? null,
         chain.source ?? "mcp_capture",
         chain.status ?? "active",
+        JSON.stringify(chain.metadata ?? {}),
       ]
     );
 
@@ -331,7 +348,7 @@ export class PGliteStorageProvider implements StorageProvider {
     if (chains.length === 0) return [];
     const db = await this.getDb();
 
-    // Build multi-row VALUES clause (12 params per row)
+    // Build multi-row VALUES clause (13 params per row)
     const valueClauses: string[] = [];
     const params: any[] = [];
     let idx = 1;
@@ -342,7 +359,7 @@ export class PGliteStorageProvider implements StorageProvider {
         : null;
 
       valueClauses.push(
-        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::vector, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
       );
       params.push(
         chain.sessionId ?? null,
@@ -357,11 +374,12 @@ export class PGliteStorageProvider implements StorageProvider {
         chain.project ?? null,
         chain.source ?? "mcp_capture",
         chain.status ?? "active",
+        JSON.stringify(chain.metadata ?? {}),
       );
     }
 
     const result = await db.query<{ id: string }>(
-      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status)
+      `INSERT INTO reasoning_chains (session_id, user_id, type, title, content, context, tags, embedding, quality, project, source, status, metadata)
        VALUES ${valueClauses.join(", ")}
        RETURNING id`,
       params
@@ -375,6 +393,14 @@ export class PGliteStorageProvider implements StorageProvider {
     const threshold = opts.matchThreshold ?? 0.5;
     const limit = opts.limit ?? 10;
     const includeSuperseded = opts.includeSuperseded ?? false;
+
+    // Configurable weights with defaults
+    const w = {
+      vectorSimilarity: opts.weights?.vectorSimilarity ?? SEARCH_WEIGHT_PRESETS.default.vectorSimilarity!,
+      textMatch: opts.weights?.textMatch ?? SEARCH_WEIGHT_PRESETS.default.textMatch!,
+      quality: opts.weights?.quality ?? SEARCH_WEIGHT_PRESETS.default.quality!,
+      recency: opts.weights?.recency ?? SEARCH_WEIGHT_PRESETS.default.recency!,
+    };
 
     const embeddingStr = toVectorLiteral(opts.queryEmbedding);
 
@@ -423,14 +449,24 @@ export class PGliteStorageProvider implements StorageProvider {
 
     conditions.push(matchCondition);
 
+    // Weight params
+    const wVecIdx = paramIdx++;
+    params.push(w.vectorSimilarity);
+    const wTextIdx = paramIdx++;
+    params.push(w.textMatch);
+    const wQualIdx = paramIdx++;
+    params.push(w.quality);
+    const wRecIdx = paramIdx++;
+    params.push(w.recency);
+
     // Limit param
     params.push(limit);
     const limitParamIdx = paramIdx++;
 
     const whereClause = conditions.join("\n          AND ");
 
-    // Blended ranking formula:
-    //   score = vector_similarity * 0.55 + text_match * 0.15 + quality * 0.15 + recency * 0.15
+    // Blended ranking formula with parameterized weights:
+    //   score = vector_similarity * w_vec + text_match * w_text + quality * w_qual + recency * w_rec
     // Recency decay: 1.0 / (1.0 + age_in_days * 0.0005) — gentle, ~15% penalty at 1 year
     const result = await db.query<{
       id: string;
@@ -447,6 +483,9 @@ export class PGliteStorageProvider implements StorageProvider {
       project: string | null;
       source: string | null;
       status: string | null;
+      metadata: Record<string, unknown> | null;
+      recall_count: number;
+      reference_count: number;
       created_at: string;
     }>(
       `SELECT
@@ -460,14 +499,17 @@ export class PGliteStorageProvider implements StorageProvider {
          1 - (rc.embedding <=> $1::vector) AS similarity,
          ${textMatchExpr} AS text_match,
          COALESCE(rc.quality, 1.0) AS quality,
-         (1 - (rc.embedding <=> $1::vector)) * 0.55
-           + ${textMatchExpr} * 0.15
-           + COALESCE(rc.quality, 1.0) * 0.15
-           + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.0005)) * 0.15
+         (1 - (rc.embedding <=> $1::vector)) * $${wVecIdx}
+           + ${textMatchExpr} * $${wTextIdx}
+           + COALESCE(rc.quality, 1.0) * $${wQualIdx}
+           + (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - rc.created_at)) / 86400.0 * 0.0005)) * $${wRecIdx}
          AS score,
          rc.project,
          rc.source,
          rc.status,
+         rc.metadata,
+         COALESCE(rc.recall_count, 0) AS recall_count,
+         COALESCE(rc.reference_count, 0) AS reference_count,
          rc.created_at
        FROM reasoning_chains rc
        WHERE ${whereClause}
@@ -490,6 +532,9 @@ export class PGliteStorageProvider implements StorageProvider {
       project: r.project ?? undefined,
       source: (r.source as ChainSource) ?? undefined,
       status: (r.status as ChainStatus) ?? undefined,
+      metadata: r.metadata ?? undefined,
+      recallCount: r.recall_count,
+      referenceCount: r.reference_count,
       createdAt: r.created_at,
     }));
   }
@@ -638,6 +683,15 @@ export class PGliteStorageProvider implements StorageProvider {
       );
     }
 
+    // Increment reference_count on target for knowledge-building relations
+    const referenceRelations = ["builds_on", "refines", "depends_on"];
+    if (referenceRelations.includes(relation.relationType)) {
+      await db.query(
+        `UPDATE reasoning_chains SET reference_count = COALESCE(reference_count, 0) + 1 WHERE id = $1`,
+        [relation.targetChainId]
+      );
+    }
+
     return result.rows[0]!.id;
   }
 
@@ -676,6 +730,26 @@ export class PGliteStorageProvider implements StorageProvider {
         `UPDATE reasoning_chains SET status = 'superseded' WHERE id IN (${placeholders}) AND COALESCE(status, 'active') = 'active'`,
         supersededTargets
       );
+    }
+
+    // Increment reference_count on targets of knowledge-building relations
+    const referenceRelations = ["builds_on", "refines", "depends_on"];
+    const referenceTargets = relations
+      .filter((r) => referenceRelations.includes(r.relationType))
+      .map((r) => r.targetChainId);
+
+    if (referenceTargets.length > 0) {
+      // Deduplicate targets and count occurrences
+      const targetCounts = new Map<string, number>();
+      for (const t of referenceTargets) {
+        targetCounts.set(t, (targetCounts.get(t) ?? 0) + 1);
+      }
+      for (const [targetId, count] of targetCounts) {
+        await db.query(
+          `UPDATE reasoning_chains SET reference_count = COALESCE(reference_count, 0) + $1 WHERE id = $2`,
+          [count, targetId]
+        );
+      }
     }
 
     return result.rows.map((r) => r.id);
@@ -828,6 +902,82 @@ export class PGliteStorageProvider implements StorageProvider {
       tags: r.tags ?? [],
       embedding: parseVectorString(r.embedding),
     }));
+  }
+
+  // ---- Dynamic Quality & Chain Mutation ----
+
+  async touchChains(chainIds: string[]): Promise<void> {
+    if (chainIds.length === 0) return;
+    const db = await this.getDb();
+
+    const placeholders = chainIds.map((_, i) => `$${i + 1}`).join(",");
+    await db.query(
+      `UPDATE reasoning_chains
+       SET recall_count = COALESCE(recall_count, 0) + 1,
+           last_recalled_at = NOW()
+       WHERE id IN (${placeholders})`,
+      chainIds
+    );
+  }
+
+  async updateChain(chainId: string, updates: {
+    tags?: string[];
+    quality?: number;
+    metadata?: Record<string, unknown>;
+    status?: ChainStatus;
+  }): Promise<void> {
+    const db = await this.getDb();
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+    let paramIdx = 1;
+
+    if (updates.tags !== undefined) {
+      setClauses.push(`tags = $${paramIdx++}`);
+      params.push(updates.tags);
+    }
+    if (updates.quality !== undefined) {
+      setClauses.push(`quality = $${paramIdx++}`);
+      params.push(updates.quality);
+    }
+    if (updates.metadata !== undefined) {
+      setClauses.push(`metadata = $${paramIdx++}`);
+      params.push(JSON.stringify(updates.metadata));
+    }
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIdx++}`);
+      params.push(updates.status);
+    }
+
+    if (setClauses.length === 0) return;
+
+    params.push(chainId);
+    await db.query(
+      `UPDATE reasoning_chains SET ${setClauses.join(", ")} WHERE id = $${paramIdx}`,
+      params
+    );
+  }
+
+  async decayUnusedChains(olderThanDays: number, decayFactor: number): Promise<number> {
+    const db = await this.getDb();
+
+    // Decay quality for chains that haven't been recalled within olderThanDays.
+    // Uses last_recalled_at if set, otherwise falls back to created_at.
+    // Only affects active chains with quality > 0.05 (avoid decaying already-negligible chains).
+    const result = await db.query<{ count: string }>(
+      `WITH decayed AS (
+         UPDATE reasoning_chains
+         SET quality = GREATEST(0.05, COALESCE(quality, 1.0) * $1)
+         WHERE COALESCE(status, 'active') = 'active'
+           AND COALESCE(quality, 1.0) > 0.05
+           AND COALESCE(last_recalled_at, created_at) < NOW() - INTERVAL '1 day' * $2
+         RETURNING id
+       )
+       SELECT COUNT(*)::text AS count FROM decayed`,
+      [decayFactor, olderThanDays]
+    );
+
+    return parseInt(result.rows[0]?.count ?? "0", 10);
   }
 }
 
