@@ -13,7 +13,7 @@ What's shipped is documented in [CLAUDE.md](../CLAUDE.md). This file covers what
 - **2.3 Chain Quality Scoring** — `quality` field (0-1) on `reasoning_chains`. MCP capture = 1.0, backfill = 0.6. Blended into search ranking.
 - **2.4 CLI Polish** — `search` with colors, `stats`, `export` to JSON/Markdown.
 - **Core Overhaul** — Hybrid search (vector + full-text), chain metadata (project, source, status, context), multi-hop graph traversal (depth 1-3), auto-archive via `supersedes` relation.
-- **PGlite Resilience** — Filesystem lock prevents concurrent access, corruption detection with recovery instructions, hardened MCP shutdown handlers.
+- **PGlite Resilience** — Filesystem lock prevents concurrent access, corruption detection with automatic backup/restore, aggressive checkpointing (every 10 writes), rolling `dumpDataDir` backups with atomic writes, startup health check (`SELECT 1`), crash handlers (`uncaughtException`/`unhandledRejection`) in both MCP server and CLI.
 
 ### Drift: Emergent Creativity (v0.3)
 

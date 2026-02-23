@@ -115,6 +115,18 @@ docs/
 
 **Chain metadata:** Each chain has `project` (direct, independent of session), `source` (`mcp_capture`, `backfill`, `agent_backfill`), and `status` (`active`, `superseded`). Creating a `supersedes` relation automatically sets the target chain's status to `superseded`. Superseded chains are excluded from search by default (opt-in via `includeSuperseded`).
 
+### PGlite corruption resilience
+
+PGlite runs Postgres in WASM (Emscripten). Dirty shutdowns (terminal close, force-quit, crash) can leave WAL files inconsistent, causing `Aborted()` on next startup. Three defense layers prevent data loss:
+
+**Layer 1 — Aggressive checkpointing:** Every 10 write operations triggers `CHECKPOINT` (flushes WAL to data files) + a rolling backup. `close()` also runs `CHECKPOINT` before shutting down. Write operations tracked: `upsertSession`, `insertReasoningChain(s)`, `insertSessionChunks`, `insertChainRelation(s)`, `touchChains`, `updateChain`, `decayUnusedChains`.
+
+**Layer 2 — Automatic backup/restore:** `createBackup()` calls `dumpDataDir('gzip')` and writes atomically (temp file + rename) to `~/.sessiongraph/pglite-backup.tar.gz` with metadata in `pglite-backup.json`. On corruption detection (`Aborted(` in error message), `attemptRestore()` deletes the corrupted directory, restores via `loadDataDir`, and verifies with `SELECT 1` + schema init. Backup triggers: every periodic checkpoint and on clean `close()`.
+
+**Layer 3 — Startup health check:** `SELECT 1` runs immediately after `PGlite.create()` to verify the DB is functional before proceeding to schema init.
+
+**Crash handlers:** Both the MCP server (`src/mcp/server.ts`) and CLI (`src/index.ts`) register `uncaughtException` and `unhandledRejection` handlers that attempt `CHECKPOINT` + backup before the process dies.
+
 ## Conventions
 
 - **Error handling:** `catch (err: unknown)` not `catch (err: any)`. Use `err instanceof Error ? err.message : String(err)`.

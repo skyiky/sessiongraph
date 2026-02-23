@@ -167,6 +167,8 @@ Local Ollama (qwen3-embedding for vectors, qwen2.5:3b for extraction)
 | Local (default) | PGlite (embedded Postgres) | Ollama (qwen3-embedding:0.6b, 1024 dims) | No |
 | Cloud | Supabase (hosted Postgres + pgvector) | Supabase Edge Functions | Yes |
 
+**Corruption resilience:** PGlite runs Postgres in WASM, which is vulnerable to WAL corruption on dirty shutdowns. SessionGraph mitigates this with aggressive checkpointing (every 10 writes), automatic rolling backups via `dumpDataDir`, and auto-restore on startup when corruption is detected. Crash handlers in both the MCP server and CLI attempt a final checkpoint + backup before the process dies.
+
 ## Supported AI Tools
 
 | Tool | Status | Data Source |

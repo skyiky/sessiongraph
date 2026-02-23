@@ -735,7 +735,18 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("beforeExit", () => shutdown("beforeExit"));
 
+// Catch unexpected crashes — attempt checkpoint + backup before dying
+process.on("uncaughtException", async (err) => {
+  console.error("Uncaught exception:", err);
+  await shutdown("uncaughtException");
+});
+
+process.on("unhandledRejection", async (reason) => {
+  console.error("Unhandled rejection:", reason);
+  await shutdown("unhandledRejection");
+});
+
 main().catch((err) => {
   console.error("Fatal error:", err);
-  process.exit(1);
+  shutdown("fatal").finally(() => process.exit(1));
 });

@@ -919,4 +919,32 @@ program
     console.log(`Done. Total synced: ${totalSynced}, total failed: ${totalFailed}.`);
   });
 
+// ---- Global crash handlers ----
+// Ensure PGlite is checkpointed + backed up on unexpected crashes.
+// The MCP server has its own handlers; these cover CLI commands.
+let isShuttingDown = false;
+
+async function emergencyShutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.error(`\n[SessionGraph] ${signal} — attempting checkpoint + backup...`);
+  try {
+    await resetProviders();
+  } catch {
+    // Best effort — we're already crashing
+  }
+}
+
+process.on("uncaughtException", async (err) => {
+  console.error("Uncaught exception:", err);
+  await emergencyShutdown("uncaughtException");
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (reason) => {
+  console.error("Unhandled rejection:", reason);
+  await emergencyShutdown("unhandledRejection");
+  process.exit(1);
+});
+
 program.parse();

@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
 import { join } from "path";
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, unlinkSync } from "fs";
 import { config, ensureDataDir } from "../config/config.ts";
 import { acquireLock } from "./lockfile.ts";
 import type {
@@ -68,6 +69,11 @@ export class PGliteStorageProvider implements StorageProvider {
   readonly mode = "local" as const;
   private db: PGlite | null = null;
   private releaseLock: (() => void) | null = null;
+  private writeCount = 0;
+  private backupInFlight = false;
+
+  /** Number of write operations between automatic CHECKPOINT + backup. */
+  private static CHECKPOINT_INTERVAL = 10;
 
   private async getDb(): Promise<PGlite> {
     if (this.db) return this.db;
@@ -90,18 +96,27 @@ export class PGliteStorageProvider implements StorageProvider {
         extensions: { vector },
       });
 
+      // Layer 3: Health check — verify DB is actually functional
+      await this.db.exec("SELECT 1");
+
       await this.db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
       await this.initSchema();
     } catch (err: unknown) {
-      this.releaseLock?.();
-      this.releaseLock = null;
-
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("Aborted(")) {
+        // Layer 2: Attempt auto-restore from backup
+        const restored = await this.attemptRestore(dataDir);
+        if (restored) {
+          return; // Successfully restored — initialize() is done
+        }
+
+        this.releaseLock?.();
+        this.releaseLock = null;
+
         console.error(
           `\nPGlite database is corrupted and cannot start.\n` +
           `Data directory: ${dataDir}\n\n` +
-          `This usually happens when two processes accessed the database simultaneously.\n` +
+          `No backup found to restore from.\n` +
           `To recover, delete the data directory and re-run:\n\n` +
           `  rm -rf "${dataDir}"\n\n` +
           `The database will be recreated automatically. Data can be rebuilt via backfill.\n`
@@ -110,17 +125,172 @@ export class PGliteStorageProvider implements StorageProvider {
           `PGlite database corrupted. Delete ${dataDir} to recover.`
         );
       }
+
+      this.releaseLock?.();
+      this.releaseLock = null;
       throw err;
+    }
+  }
+
+  /**
+   * Attempt to restore from a backup after corruption is detected.
+   * Deletes the corrupted data directory, restores from backup, re-initializes.
+   * Returns true if restoration succeeded, false if no backup available.
+   */
+  private async attemptRestore(dataDir: string): Promise<boolean> {
+    const backupPath = config.paths.pgliteBackup;
+    const backupMetaPath = config.paths.pgliteBackupMeta;
+
+    if (!existsSync(backupPath)) {
+      return false;
+    }
+
+    // Read backup metadata for logging
+    let backupAge = "unknown age";
+    try {
+      if (existsSync(backupMetaPath)) {
+        const meta = JSON.parse(readFileSync(backupMetaPath, "utf-8"));
+        if (meta.timestamp) {
+          const ageMs = Date.now() - new Date(meta.timestamp).getTime();
+          const ageHours = Math.round(ageMs / (1000 * 60 * 60) * 10) / 10;
+          backupAge = ageHours < 1
+            ? `${Math.round(ageMs / (1000 * 60))} minutes old`
+            : `${ageHours} hours old`;
+        }
+      }
+    } catch {
+      // Metadata is optional — proceed without it
+    }
+
+    console.error(
+      `\n[SessionGraph] Database corruption detected. Restoring from backup (${backupAge})...`
+    );
+
+    try {
+      // Close the broken instance if it partially initialized
+      if (this.db) {
+        try { await this.db.close(); } catch { /* ignore */ }
+        this.db = null;
+      }
+
+      // Delete the corrupted data directory
+      rmSync(dataDir, { recursive: true, force: true });
+
+      // Read backup blob
+      const backupData = readFileSync(backupPath);
+      const backupBlob = new Blob([backupData]);
+
+      // Restore from backup
+      this.db = await PGlite.create({
+        dataDir,
+        loadDataDir: backupBlob,
+        extensions: { vector },
+      });
+
+      // Verify the restored DB works
+      await this.db.exec("SELECT 1");
+      await this.db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
+      await this.initSchema();
+
+      console.error(
+        `[SessionGraph] Successfully restored from backup (${backupAge}). Some recent data may be lost.\n`
+      );
+      return true;
+    } catch (restoreErr: unknown) {
+      const restoreMsg = restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
+      console.error(
+        `[SessionGraph] Backup restoration failed: ${restoreMsg}\n` +
+        `Falling back to manual recovery.\n`
+      );
+
+      // Clean up partial state
+      if (this.db) {
+        try { await this.db.close(); } catch { /* ignore */ }
+        this.db = null;
+      }
+      return false;
     }
   }
 
   async close(): Promise<void> {
     if (this.db) {
+      // Layer 1: CHECKPOINT before close to flush WAL to data files
+      try {
+        await this.db.exec("CHECKPOINT");
+      } catch (err: unknown) {
+        console.error(
+          "CHECKPOINT before close failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+
+      // Layer 2: Final backup before shutdown
+      try {
+        await this.createBackup();
+      } catch (err: unknown) {
+        console.error(
+          "Backup before close failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+
       await this.db.close();
       this.db = null;
     }
     this.releaseLock?.();
     this.releaseLock = null;
+  }
+
+  /**
+   * Called after each write operation. Triggers CHECKPOINT + backup
+   * every CHECKPOINT_INTERVAL writes to minimize the dirty window.
+   */
+  private async afterWrite(): Promise<void> {
+    this.writeCount++;
+    if (this.writeCount >= PGliteStorageProvider.CHECKPOINT_INTERVAL) {
+      this.writeCount = 0;
+      if (!this.db || this.backupInFlight) return;
+
+      this.backupInFlight = true;
+      try {
+        await this.db.exec("CHECKPOINT");
+        await this.createBackup();
+      } catch (err: unknown) {
+        console.error(
+          "Periodic checkpoint/backup failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      } finally {
+        this.backupInFlight = false;
+      }
+    }
+  }
+
+  /**
+   * Create a rolling backup of the PGlite data directory.
+   * Uses atomic write (temp file + rename) to avoid corrupt backups.
+   */
+  private async createBackup(): Promise<void> {
+    if (!this.db) return;
+
+    const backupPath = config.paths.pgliteBackup;
+    const backupMetaPath = config.paths.pgliteBackupMeta;
+    const tmpPath = backupPath + ".tmp";
+
+    const dumpBlob = await this.db.dumpDataDir("gzip");
+    const buffer = Buffer.from(await dumpBlob.arrayBuffer());
+
+    // Atomic write: write to temp, then rename
+    writeFileSync(tmpPath, buffer);
+    renameSync(tmpPath, backupPath);
+
+    // Write metadata
+    const meta = {
+      timestamp: new Date().toISOString(),
+      writeCount: this.writeCount,
+      sizeBytes: buffer.length,
+    };
+    writeFileSync(backupMetaPath, JSON.stringify(meta, null, 2));
   }
 
   private async initSchema(): Promise<void> {
@@ -282,6 +452,7 @@ export class PGliteStorageProvider implements StorageProvider {
       ]
     );
 
+    await this.afterWrite();
     return id;
   }
 
@@ -375,8 +546,10 @@ export class PGliteStorageProvider implements StorageProvider {
       ]
     );
 
+    await this.afterWrite();
     return result.rows[0]!.id;
   }
+
 
   async insertReasoningChains(chains: ReasoningChain[]): Promise<string[]> {
     if (chains.length === 0) return [];
@@ -419,6 +592,7 @@ export class PGliteStorageProvider implements StorageProvider {
       params
     );
 
+    await this.afterWrite();
     return result.rows.map((r) => r.id);
   }
 
@@ -709,6 +883,8 @@ export class PGliteStorageProvider implements StorageProvider {
        VALUES ${valueClauses.join(", ")}`,
       params
     );
+
+    await this.afterWrite();
   }
 
   // ---- Chain Relations ----
@@ -746,6 +922,7 @@ export class PGliteStorageProvider implements StorageProvider {
       );
     }
 
+    await this.afterWrite();
     return result.rows[0]!.id;
   }
 
@@ -810,6 +987,7 @@ export class PGliteStorageProvider implements StorageProvider {
       }
     }
 
+    await this.afterWrite();
     return result.rows.map((r) => r.id);
   }
 
@@ -976,6 +1154,8 @@ export class PGliteStorageProvider implements StorageProvider {
        WHERE id IN (${placeholders})`,
       chainIds
     );
+
+    await this.afterWrite();
   }
 
   async updateChain(chainId: string, updates: {
@@ -1014,6 +1194,8 @@ export class PGliteStorageProvider implements StorageProvider {
       `UPDATE reasoning_chains SET ${setClauses.join(", ")} WHERE id = $${paramIdx}`,
       params
     );
+
+    await this.afterWrite();
   }
 
   async decayUnusedChains(olderThanDays: number, decayFactor: number): Promise<number> {
@@ -1035,7 +1217,9 @@ export class PGliteStorageProvider implements StorageProvider {
       [decayFactor, olderThanDays]
     );
 
-    return parseInt(result.rows[0]?.count ?? "0", 10);
+    const count = parseInt(result.rows[0]?.count ?? "0", 10);
+    if (count > 0) await this.afterWrite();
+    return count;
   }
 
   // ---- Drift: Stochastic Graph Walk ----

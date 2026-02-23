@@ -28,6 +28,8 @@ export function createConfig() {
   const CONFIG_PATH = join(DATA_DIR, "config.json");
   const AUTH_PATH = join(DATA_DIR, "auth.json");
   const PGLITE_DIR = join(DATA_DIR, "pglite");
+  const PGLITE_BACKUP_PATH = join(DATA_DIR, "pglite-backup.tar.gz");
+  const PGLITE_BACKUP_META_PATH = join(DATA_DIR, "pglite-backup.json");
 
   // OpenCode paths
   const OPENCODE_DATA_DIR = join(homedir(), ".local", "share", "opencode");
@@ -69,6 +71,8 @@ export function createConfig() {
       config: CONFIG_PATH,
       auth: AUTH_PATH,
       pgliteDir: PGLITE_DIR,
+      pgliteBackup: PGLITE_BACKUP_PATH,
+      pgliteBackupMeta: PGLITE_BACKUP_META_PATH,
     },
     opencode: {
       dataDir: OPENCODE_DATA_DIR,
