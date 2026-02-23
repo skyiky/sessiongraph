@@ -88,9 +88,23 @@ export class PGliteStorageProvider implements StorageProvider {
       await this.db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
       await this.initSchema();
     } catch (err: unknown) {
-      // Release lock if initialization fails
       this.releaseLock?.();
       this.releaseLock = null;
+
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("Aborted(")) {
+        console.error(
+          `\nPGlite database is corrupted and cannot start.\n` +
+          `Data directory: ${dataDir}\n\n` +
+          `This usually happens when two processes accessed the database simultaneously.\n` +
+          `To recover, delete the data directory and re-run:\n\n` +
+          `  rm -rf "${dataDir}"\n\n` +
+          `The database will be recreated automatically. Data can be rebuilt via backfill.\n`
+        );
+        throw new Error(
+          `PGlite database corrupted. Delete ${dataDir} to recover.`
+        );
+      }
       throw err;
     }
   }
